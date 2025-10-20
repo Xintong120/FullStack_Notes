@@ -56,3 +56,11 @@ build/
 # Backup files
 *.bak
 *.backup
+
+# User-specific ignored files
+Backend/python/1.python库名录.md
+Backend/python/3.Web 开发基础.md
+Frontend/AutoGPT_learn.md
+Frontend/autogpt_platform.md
+Frontend/fastapi.md
+Frontend/React_update.md
