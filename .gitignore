@@ -59,7 +59,9 @@ build/
 
 # User-specific ignored files
 Backend/python/1.python库名录.md
-Backend/python/3.Web 开发基础.md
+Backend/python/fastapi_plan.md
+Backend/python/FastAPI.md
+Backend/python/4.md
 Frontend/AutoGPT_learn.md
 Frontend/autogpt_platform.md
 Frontend/fastapi.md
