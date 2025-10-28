@@ -61,6 +61,11 @@ build/
 Backend/python/1.python库名录.md
 Backend/python/fastapi_plan.md
 Backend/python/4.md
+Backend/测试框架.md
+Backend/配置管理.md
+Backend/日志系统.md
+Backend/fastapi_plan.md
+Agent/langgraph_memory_study.md
 Frontend/AutoGPT_learn.md
 Frontend/autogpt_platform.md
 Frontend/fastapi.md

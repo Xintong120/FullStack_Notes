@@ -1,4 +1,19 @@
-# 1 路由和端点定义
+# 1 路由和端点
+
+> - **端点 (Endpoint)**：API 中一个具体的 URL 地址，如 `https://api.autogpt.com/graphs/123`。它代表了一个可调用的资源或功能。
+> - **路由 (Route)**：将 HTTP 请求（URL + 方法）映射到处理函数的过程。在 FastAPI 中，通过装饰器定义路由。
+>
+> 路由是 FastAPI 的核心，它决定：
+>
+> - 哪个 URL 被哪个函数处理
+> - 接受哪些 HTTP 方法（GET, POST 等）
+> - 如何提取请求中的数据（参数、请求体等）
+>
+> **路由映射 = 按钮动作 → 业务逻辑**
+>
+> - **前端按钮**：触发 HTTP 请求
+> - **路由装饰器**：告诉 FastAPI 哪个 URL 对应哪个函数
+> - **业务逻辑**：执行 AI 调用、数据处理等
 
 ## 1.1 **基础复习**
 
@@ -538,7 +553,7 @@ def create_item(item: Item):
 
 ---
 
-## 1.3**对比：传统方式 vs FastAPI**
+## 1.3 **对比：传统方式 vs FastAPI**
 
 **Flask 传统方式**
 
@@ -587,7 +602,7 @@ def get_user(
 
 ---
 
-## 1.4**核心要点总结**
+## 1.4 **核心要点总结**
 
 ### **1.4.1 HTTP 基础**
 - 理解不同 HTTP 方法的用途和特性
@@ -1255,7 +1270,7 @@ async def get_graph(graph_id: str, user_id: str):
 ### **1.6.2 标准化的参数使用**
 ```python
 # 路径参数：标识特定资源
-graph_id: str
+graph_id: str 
 block_id: str
 version: int
 
@@ -2911,6 +2926,23 @@ with database_connection() as conn:
 ## 3.2 **FastAPI 特性**
 
 ### **3.2.1 Depends() 基础用法**
+
+> ## 总结：何时使用 `Depends()`
+>
+> **需要使用的情况**：
+>
+> -  需要用户认证时
+> -  需要数据库连接时
+> -  需要外部服务调用时
+> -  需要业务规则验证时
+> -  需要配置参数时
+> -  需要缓存连接时
+>
+> **不需要使用的情况**：
+>
+> -  简单的参数验证（用 Pydantic 模型）
+> -  静态配置（直接导入）
+> -  纯计算逻辑（直接在函数中写）
 
 FastAPI 使用 `Depends()` 声明依赖：
 
@@ -16685,4 +16717,3762 @@ async def test_graph_execution(server):
 ```
 
 
+
+# 阶段四：AutoGPT 独家专题
+## 专题A：RPC 模式深度剖析
+
+---
+
+## 核心内容 1：RPC 框架架构概览
+
+### 整体架构图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   AutoGPT RPC 框架                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌────────────────┐         HTTP          ┌──────────────┐ │
+│  │                │◄────────────────────►  │              │ │
+│  │  RPC Client    │     POST /method      │ RPC Server   │ │
+│  │ (DynamicClient)│     JSON Payload      │ (AppService) │ │
+│  │                │                        │              │ │
+│  └────────────────┘                        └──────────────┘ │
+│         │                                          │         │
+│         │ __getattr__                              │ @expose │
+│         │ 动态方法调用                              │ 方法注册 │
+│         ▼                                          ▼         │
+│  ┌────────────────┐                        ┌──────────────┐ │
+│  │   httpx.Client │                        │   FastAPI    │ │
+│  │   同步/异步     │                        │   路由生成   │ │
+│  └────────────────┘                        └──────────────┘ │
+│         │                                          │         │
+│         │                                          │         │
+│         └──────────► 异常映射 ◄────────────────────┘         │
+│              RemoteCallError + EXCEPTION_MAPPING            │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+关键特性：
+✓ 透明的远程调用（像调用本地方法）
+✓ 自动类型转换和验证（Pydantic）
+✓ 异常传递和重建
+✓ 连接池和重试机制
+✓ Prometheus 监控集成
+```
+
+---
+
+## 核心内容 2：@expose 装饰器机制
+
+### 装饰器实现
+
+```python
+# 第 79-85 行
+P = ParamSpec("P")
+R = TypeVar("R")
+EXPOSED_FLAG = "__exposed__"  # 标记属性
+
+def expose(func: C) -> C:
+    """
+    将方法标记为可远程调用的 RPC 端点
+    
+    工作原理：
+    1. 获取原始函数（如果是 classmethod/staticmethod）
+    2. 设置 __exposed__ 属性为 True
+    3. 返回原函数（不修改行为）
+    """
+    func = getattr(func, "__func__", func)  # 解包装饰器
+    setattr(func, EXPOSED_FLAG, True)       # 设置标记
+    return func
+```
+
+### 使用示例
+
+```python
+class MyService(AppService):
+    @classmethod
+    def get_port(cls) -> int:
+        return 8001
+    
+    @expose  # ← 标记为 RPC 端点
+    def add_numbers(self, a: int, b: int) -> int:
+        """这个方法会自动暴露为 POST /add_numbers"""
+        return a + b
+    
+    @expose
+    async def fetch_data(self, user_id: str) -> dict:
+        """异步方法也支持"""
+        data = await database.get_user(user_id)
+        return data.model_dump()
+    
+    def _internal_method(self):
+        """没有 @expose，不会暴露为 RPC 端点"""
+        pass
+```
+
+**关键点**：
+- 只需要添加 `@expose` 装饰器
+- 支持同步和异步方法
+- 自动处理参数和返回值
+- 内部方法不暴露
+
+---
+
+## 核心内容 3：方法转 HTTP 端点
+
+### 自动路由注册
+
+```python
+# 第 305-316 行：服务启动时注册路由
+def run(self):
+    self.fastapi_app = FastAPI()
+    
+    # 遍历类的所有属性
+    for attr_name, attr in vars(type(self)).items():
+        # 检查是否有 __exposed__ 标记
+        if getattr(attr, EXPOSED_FLAG, False):
+            route_path = f"/{attr_name}"  # 方法名 = 路由路径
+            
+            # 创建 FastAPI 端点并注册
+            self.fastapi_app.add_api_route(
+                route_path,
+                self._create_fastapi_endpoint(attr),  # 动态生成端点
+                methods=["POST"],  # 所有 RPC 都是 POST
+            )
+    
+    # 添加健康检查端点
+    self.fastapi_app.add_api_route(
+        "/health_check", self.health_check, methods=["POST", "GET"]
+    )
+```
+
+### 端点生成魔法
+
+```python
+# 第 208-257 行：_create_fastapi_endpoint
+def _create_fastapi_endpoint(self, func: Callable) -> Callable:
+    """
+    核心魔法：将任意 Python 方法转换为 FastAPI 端点
+    
+    步骤：
+    1. 使用 inspect 提取函数签名
+    2. 动态创建 Pydantic 请求模型
+    3. 生成 FastAPI 兼容的端点函数
+    4. 处理同步/异步差异
+    """
+    sig = inspect.signature(func)
+    fields = {}
+    
+    is_bound_method = False
+    for name, param in sig.parameters.items():
+        # 跳过 self/cls 参数
+        if name in ("self", "cls"):
+            is_bound_method = True
+            continue
+        
+        # 提取类型注解（默认为 str）
+        annotation = (
+            param.annotation 
+            if param.annotation != inspect.Parameter.empty 
+            else str
+        )
+        
+        # 提取默认值（无默认值则为必填）
+        default = (
+            param.default 
+            if param.default != inspect.Parameter.empty 
+            else ...  # ... 表示必填
+        )
+        
+        fields[name] = (annotation, default)
+    
+    # 动态创建 Pydantic 模型
+    RequestBodyModel = create_model("RequestBodyModel", **fields)
+    
+    # 绑定方法（如果需要）
+    f = func.__get__(self) if is_bound_method else func
+    
+    # 根据函数类型创建端点
+    if asyncio.iscoroutinefunction(f):
+        # 异步端点
+        async def async_endpoint(body: RequestBodyModel):
+            result = await f(
+                **{name: getattr(body, name) for name in type(body).model_fields}
+            )
+            _validate_no_prisma_objects(result, f"{func.__name__} result")
+            return result
+        
+        return async_endpoint
+    else:
+        # 同步端点
+        def sync_endpoint(body: RequestBodyModel):
+            result = f(
+                **{name: getattr(body, name) for name in type(body).model_fields}
+            )
+            _validate_no_prisma_objects(result, f"{func.__name__} result")
+            return result
+        
+        return sync_endpoint
+```
+
+### 完整示例
+
+```python
+# 原始方法
+@expose
+def calculate_price(self, base_price: float, tax_rate: float = 0.1, discount: float = 0) -> dict:
+    total = base_price * (1 + tax_rate) - discount
+    return {"total": total, "breakdown": {"base": base_price, "tax": tax_rate}}
+
+# 自动生成的 Pydantic 模型（等价于）
+class RequestBodyModel(BaseModel):
+    base_price: float  # 必填，无默认值
+    tax_rate: float = 0.1  # 可选，有默认值
+    discount: float = 0  # 可选，有默认值
+
+# 自动生成的 FastAPI 端点（等价于）
+@app.post("/calculate_price")
+def calculate_price_endpoint(body: RequestBodyModel):
+    result = self.calculate_price(
+        base_price=body.base_price,
+        tax_rate=body.tax_rate,
+        discount=body.discount
+    )
+    return result
+
+# 客户端调用
+client.calculate_price(base_price=100.0, tax_rate=0.15)
+# → POST /calculate_price
+# → Body: {"base_price": 100.0, "tax_rate": 0.15, "discount": 0}
+```
+
+---
+
+## 核心内容 4：inspect 模块的应用
+
+### inspect 的 4 大应用场景
+
+```python
+# 1. 提取函数签名
+sig = inspect.signature(func)
+# → Signature(base_price: float, tax_rate: float = 0.1, discount: float = 0)
+
+# 2. 遍历参数
+for name, param in sig.parameters.items():
+    print(f"{name}: {param.annotation}, default={param.default}")
+# → base_price: <class 'float'>, default=<class 'inspect._empty'>
+# → tax_rate: <class 'float'>, default=0.1
+
+# 3. 检测函数类型
+if asyncio.iscoroutinefunction(func):
+    print("异步函数")
+else:
+    print("同步函数")
+
+# 4. 动态获取异常类（异常映射）
+EXCEPTION_MAPPING = {
+    e.__name__: e
+    for e in [ValueError, RuntimeError, ...]
+    for _, ErrorType in inspect.getmembers(exceptions)
+    if inspect.isclass(ErrorType)
+    and issubclass(ErrorType, Exception)
+}
+```
+
+### 实战：参数解析
+
+```python
+def _get_params(self, signature: inspect.Signature, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """
+    将位置参数转换为关键字参数
+    
+    示例：
+    client.add(5, 3)  # 位置参数
+    → 转换为 → {"a": 5, "b": 3}
+    → 发送为 → POST /add Body: {"a": 5, "b": 3}
+    """
+    if args:
+        # 获取参数名列表
+        arg_names = list(signature.parameters.keys())
+        
+        # 跳过 self/cls
+        if arg_names and arg_names[0] in ("self", "cls"):
+            arg_names = arg_names[1:]
+        
+        # 将位置参数映射到参数名
+        kwargs.update(dict(zip(arg_names, args)))
+    
+    return kwargs
+
+# 使用示例
+sig = inspect.signature(add_method)  # add(a: int, b: int)
+params = _get_params(sig, 5, 3)
+# → {"a": 5, "b": 3}
+```
+
+### 类型验证和转换
+
+```python
+def _get_return(self, expected_return: TypeAdapter | None, result: Any) -> Any:
+    """
+    使用类型注解验证和转换返回值
+    
+    示例：
+    def get_user(user_id: str) -> User:  # 返回类型注解
+        ...
+    
+    result = {"id": 1, "name": "John"}  # API 返回的 dict
+    → TypeAdapter(User).validate_python(result)
+    → User(id=1, name="John")  # 转换为 Pydantic 模型
+    """
+    if expected_return:
+        return expected_return.validate_python(result)
+    return result
+
+# 在客户端使用
+sig = inspect.signature(original_func)
+ret_ann = sig.return_annotation  # 获取返回类型
+expected_return = (
+    None if ret_ann is inspect.Signature.empty 
+    else TypeAdapter(ret_ann)
+)
+```
+
+---
+
+## 核心内容 5：RPC 客户端实现
+
+### DynamicClient 核心机制
+
+```python
+class DynamicClient:
+    """
+    动态 RPC 客户端 - 魔法在于 __getattr__
+    
+    原理：
+    1. 拦截所有未定义的属性访问
+    2. 检查 AppServiceClient 是否定义了该方法
+    3. 动态创建 HTTP 调用包装器
+    4. 保持类型签名和文档
+    """
+    
+    def __init__(self):
+        service_type = service_client_type.get_service_type()
+        host = service_type.get_host()
+        port = service_type.get_port()
+        self.base_url = f"http://{host}:{port}"
+        
+        # 连接池管理
+        self._sync_clients = {}   # 同步客户端池
+        self._async_clients = {}  # 异步客户端池（按事件循环）
+    
+    @property
+    def async_client(self) -> httpx.AsyncClient:
+        """
+        智能异步客户端管理 - 每个事件循环一个客户端
+        
+        为什么？
+        - httpx.AsyncClient 不是线程安全的
+        - 不同的事件循环需要独立的客户端
+        - 避免 "attached to a different loop" 错误
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None  # 没有事件循环时的默认客户端  
+        
+        if client := self._async_clients.get(loop):
+            return client
+        
+        # 创建新客户端并缓存
+        return self._async_clients.setdefault(
+            loop, 
+            self._create_async_client()
+        )
+    
+    def __getattr__(self, name: str) -> Callable[..., Any]:
+        """
+        核心魔法：拦截方法调用
+        
+        client.add_numbers(5, 3)
+        ↓
+        1. __getattr__("add_numbers") 被调用
+        2. 从 service_client_type 获取方法签名
+        3. 创建 HTTP 调用包装器
+        4. 返回包装器（看起来像普通方法）
+        """
+        # 获取原始方法定义
+        original_func = getattr(service_client_type, name, None)
+        if original_func is None:
+            raise AttributeError(f"Method {name} not found")
+        
+        # 提取签名和返回类型
+        sig = inspect.signature(original_func)
+        ret_ann = sig.return_annotation
+        expected_return = (
+            None if ret_ann is inspect.Signature.empty 
+            else TypeAdapter(ret_ann)
+        )
+        
+        # 根据是否异步创建不同的包装器
+        if inspect.iscoroutinefunction(original_func):
+            # 异步方法
+            async def async_method(*args, **kwargs):
+                params = self._get_params(sig, *args, **kwargs)
+                result = await self._call_method_async(name, **params)
+                return self._get_return(expected_return, result)
+            
+            return async_method
+        else:
+            # 同步方法
+            def sync_method(*args, **kwargs):
+                params = self._get_params(sig, *args, **kwargs)
+                result = self._call_method_sync(name, **params)
+                return self._get_return(expected_return, result)
+            
+            return sync_method
+```
+
+### HTTP 调用实现
+
+```python
+@_maybe_retry  # 可选的重试装饰器
+async def _call_method_async(self, method_name: str, **kwargs: Any) -> Any:
+    """
+    异步 RPC 调用
+    
+    流程：
+    1. 使用 async_client 发送 POST 请求
+    2. 路径 = 方法名，Body = JSON 参数
+    3. 处理响应或异常
+    """
+    try:
+        response = await self.async_client.post(
+            method_name,  # 例如："/add_numbers"
+            json=to_dict(kwargs)  # {"a": 5, "b": 3}
+        )
+        return self._handle_call_method_response(
+            method_name=method_name,
+            response=response
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        self._handle_connection_error(e)
+        raise
+
+def _call_method_sync(self, method_name: str, **kwargs: Any) -> Any:
+    """同步版本 - 逻辑相同"""
+    try:
+        response = self.sync_client.post(
+            method_name,
+            json=to_dict(kwargs)
+        )
+        return self._handle_call_method_response(
+            method_name=method_name,
+            response=response
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        self._handle_connection_error(e)
+        raise
+```
+
+### 连接自愈机制
+
+```python
+def _handle_connection_error(self, error: Exception) -> None:
+    """
+    智能连接错误处理和自愈
+    
+    策略：
+    1. 计数连接失败次数
+    2. 达到阈值（3次）且距上次重置超过30秒
+    3. 清空客户端缓存，强制重新创建
+    4. 重置计数器
+    """
+    self._connection_failure_count += 1
+    current_time = time.time()
+    
+    if (
+        self._connection_failure_count >= 3
+        and current_time - self._last_client_reset > 30
+    ):
+        logger.warning(
+            f"Connection failures detected ({self._connection_failure_count}), "
+            "recreating HTTP clients"
+        )
+        
+        # 清空缓存 - 下次访问时自动重建
+        self._sync_clients.clear()
+        self._async_clients.clear()
+        
+        # 重置
+        self._connection_failure_count = 0
+        self._last_client_reset = current_time
+```
+
+---
+
+##  核心内容 6：异常映射和传递
+
+### 异常映射机制
+
+```python
+# 第 159-177 行：构建异常映射表
+EXCEPTION_MAPPING = {
+    e.__name__: e  # 异常名 → 异常类
+    for e in [
+        # 内置异常
+        ValueError,
+        RuntimeError,
+        TimeoutError,
+        ConnectionError,
+        
+        # 自定义异常
+        UnhealthyServiceError,
+        HTTPClientError,
+        HTTPServerError,
+        
+        # backend.util.exceptions 中的所有异常
+        *[
+            ErrorType
+            for _, ErrorType in inspect.getmembers(exceptions)
+            if inspect.isclass(ErrorType)
+            and issubclass(ErrorType, Exception)
+            and ErrorType.__module__ == exceptions.__name__
+        ],
+    ]
+}
+
+# 结果示例：
+# {
+#     "ValueError": <class 'ValueError'>,
+#     "RuntimeError": <class 'RuntimeError'>,
+#     "NotFoundError": <class 'backend.util.exceptions.NotFoundError'>,
+#     "NotAuthorizedError": <class 'backend.util.exceptions.NotAuthorizedError'>,
+#     ...
+# }
+```
+
+### 服务端异常序列化
+
+```python
+# 第 189-206 行：异常处理器
+@staticmethod
+def _handle_internal_http_error(status_code: int = 500, log_error: bool = True):
+    def handler(request: Request, exc: Exception):
+        if log_error:
+            logger.exception(f"{request.method} {request.url.path} failed: {exc}")
+        
+        # 将异常序列化为 JSON
+        return responses.JSONResponse(
+            status_code=status_code,
+            content=RemoteCallError(
+                type=str(exc.__class__.__name__),  # 异常类名
+                args=exc.args or (str(exc),),      # 异常参数
+            ).model_dump(),
+        )
+    
+    return handler
+
+# 注册异常处理器
+self.fastapi_app.add_exception_handler(
+    ValueError, self._handle_internal_http_error(400)
+)
+self.fastapi_app.add_exception_handler(
+    Exception, self._handle_internal_http_error(500)
+)
+```
+
+### 客户端异常重建
+
+```python
+# 第 474-507 行：响应处理
+def _handle_call_method_response(
+    self, *, response: httpx.Response, method_name: str
+) -> Any:
+    try:
+        response.raise_for_status()
+        self._connection_failure_count = 0  # 成功则重置
+        return response.json()
+    
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code
+        
+        # 尝试解析为 RemoteCallError
+        error_response = None
+        try:
+            error_response = RemoteCallError.model_validate(
+                e.response.json()
+            )
+        except Exception:
+            pass
+        
+        # 重建映射的异常
+        if error_response and error_response.type in EXCEPTION_MAPPING:
+            exception_class = EXCEPTION_MAPPING[error_response.type]
+            args = error_response.args or [str(e)]
+            raise exception_class(*args)  # ← 重建原始异常！
+        
+        # HTTP 状态码分类
+        if 400 <= status_code < 500:
+            raise HTTPClientError(status_code, str(e))
+        elif 500 <= status_code < 600:
+            raise HTTPServerError(status_code, str(e))
+        else:
+            raise e
+```
+
+### 完整异常传递流程
+
+```python
+"""
+异常传递完整流程：
+
+服务端：
+1. 用户调用：client.get_user("invalid-id")
+2. 服务端执行：raise NotFoundError("User not found")
+3. FastAPI 捕获异常
+4. 异常处理器序列化：
+   {
+     "type": "NotFoundError",
+     "args": ["User not found"]
+   }
+5. 返回 HTTP 404 + JSON body
+
+客户端：
+6. httpx 接收 404 响应
+7. 解析 JSON → RemoteCallError
+8. 查找 EXCEPTION_MAPPING["NotFoundError"]
+9. 重建异常：raise NotFoundError("User not found")
+10. 用户代码捕获：except NotFoundError as e
+
+结果：就像本地调用一样！
+"""
+
+# 服务端
+class UserService(AppService):
+    @expose
+    def get_user(self, user_id: str) -> User:
+        user = database.find(user_id)
+        if not user:
+            raise NotFoundError(f"User {user_id} not found")
+        return user
+
+# 客户端
+try:
+    user = client.get_user("invalid-id")
+except NotFoundError as e:  # ← 异常被完美重建
+    print(f"Error: {e}")  # → "User invalid-id not found"
+```
+
+---
+
+## 核心内容 7：实战示例
+
+### 完整的服务定义
+
+```python
+# backend/executor/database.py
+from backend.util.service import AppService, AppServiceClient, expose, endpoint_to_sync
+
+class DatabaseManager(AppService):
+    """数据库管理服务 - RPC 服务端"""
+    
+    @classmethod
+    def get_port(cls) -> int:
+        return 8002  # 服务端口
+    
+    def run_service(self) -> None:
+        """服务启动时的初始化"""
+        logger.info("Connecting to Database...")
+        self.run_and_wait(db.connect())
+        logger.info("Database connected successfully")
+    
+    @expose
+    async def get_graph(
+        self,
+        graph_id: str,
+        user_id: str,
+        version: Optional[int] = None
+    ) -> GraphModel:
+        """
+        获取 Graph - 异步方法
+        
+        自动转换为：POST /get_graph
+        请求体：{"graph_id": "...", "user_id": "...", "version": 1}
+        """
+        graph = await graph_db.get_graph(
+            graph_id=graph_id,
+            user_id=user_id,
+            version=version
+        )
+        if not graph:
+            raise NotFoundError(f"Graph {graph_id} not found")
+        return graph
+    
+    @expose
+    async def create_graph(
+        self,
+        graph: GraphCreate,
+        user_id: str
+    ) -> GraphModel:
+        """
+        创建 Graph
+        
+        注意：接受 Pydantic 模型作为参数
+        Pydantic 会自动序列化/反序列化
+        """
+        new_graph = await graph_db.create_graph(graph, user_id)
+        return new_graph
+    
+    @expose
+    async def delete_graph(self, graph_id: str, user_id: str) -> dict:
+        """删除 Graph"""
+        deleted_count = await graph_db.delete_graph(graph_id, user_id)
+        return {"deleted": deleted_count}
+```
+
+### 客户端定义（同步）
+
+```python
+class DatabaseManagerClient(AppServiceClient):
+    """数据库管理客户端 - 同步版本"""
+    
+    @classmethod
+    def get_service_type(cls) -> Type[AppService]:
+        return DatabaseManager
+    
+    # 使用 endpoint_to_sync 创建类型存根
+    _ = endpoint_to_sync
+    d = DatabaseManager
+    
+    # 方法签名必须与服务端一致
+    get_graph = _(d.get_graph)
+    create_graph = _(d.create_graph)
+    delete_graph = _(d.delete_graph)
+    
+    # IDE 看到的签名（同步版本）：
+    # def get_graph(self, graph_id: str, user_id: str, version: Optional[int] = None) -> GraphModel:
+    #     ...
+
+# 使用客户端
+client = get_service_client(DatabaseManagerClient)
+
+# 同步调用（即使服务端是异步的）
+graph = client.get_graph(
+    graph_id="graph-123",
+    user_id="user-456"
+)
+```
+
+### 客户端定义（异步）
+
+```python
+class DatabaseManagerAsyncClient(AppServiceClient):
+    """数据库管理客户端 - 异步版本"""
+    
+    @classmethod
+    def get_service_type(cls) -> Type[AppService]:
+        return DatabaseManager
+    
+    # 异步客户端不需要 endpoint_to_async
+    # 直接使用原方法签名
+    async def get_graph(
+        self,
+        graph_id: str,
+        user_id: str,
+        version: Optional[int] = None
+    ) -> GraphModel:
+        ...  # 由 __getattr__ 拦截
+    
+    async def create_graph(
+        self,
+        graph: GraphCreate,
+        user_id: str
+    ) -> GraphModel:
+        ...
+
+# 使用
+client = get_service_client(DatabaseManagerAsyncClient)
+graph = await client.get_graph("graph-123", "user-456")
+```
+
+### endpoint_to_sync/async 魔法
+
+```python
+# backend/util/service.py (633-658行)
+
+def endpoint_to_sync(
+    func: Callable[Concatenate[Any, P], Awaitable[R]],
+) -> Callable[Concatenate[Any, P], R]:
+    """
+    类型转换魔法：async → sync
+    
+    作用：
+    1. 接受异步函数签名
+    2. 返回同步函数签名
+    3. 实际不执行（会被 __getattr__ 拦截）
+    4. 仅用于 IDE 类型提示
+    
+    示例：
+    # 服务端
+    async def get_user(self, user_id: str) -> User: ...
+    
+    # 客户端
+    get_user = endpoint_to_sync(d.get_user)
+    
+    # IDE 看到：
+    def get_user(self, user_id: str) -> User: ...  # 同步！
+    """
+    def _stub(*args: P.args, **kwargs: P.kwargs) -> R:
+        raise RuntimeError("should be intercepted by __getattr__")
+    
+    update_wrapper(_stub, func)  # 复制文档和签名
+    return cast(Callable[Concatenate[Any, P], R], _stub)
+
+def endpoint_to_async(
+    func: Callable[Concatenate[Any, P], R],
+) -> Callable[Concatenate[Any, P], Awaitable[R]]:
+    """
+    类型转换魔法：sync → async（较少用）
+    """
+    async def _stub(*args: P.args, **kwargs: P.kwargs) -> R:
+        raise RuntimeError("should be intercepted by __getattr__")
+    
+    update_wrapper(_stub, func)
+    return cast(Callable[Concatenate[Any, P], Awaitable[R]], _stub)
+```
+
+### 实际调用流程
+
+```python
+"""
+完整的 RPC 调用流程：
+
+1. 客户端调用
+   client.get_graph(graph_id="123", user_id="456")
+   
+2. __getattr__ 拦截
+   - 检测到 "get_graph" 属性访问
+   - 从 DatabaseManagerClient 获取签名
+   - 创建 HTTP 调用包装器
+   
+3. HTTP 请求
+   POST http://localhost:8002/get_graph
+   Body: {"graph_id": "123", "user_id": "456"}
+   
+4. 服务端处理
+   - FastAPI 路由到 /get_graph
+   - 调用 _create_fastapi_endpoint 生成的端点
+   - Pydantic 验证请求体
+   - 调用 DatabaseManager.get_graph(graph_id="123", user_id="456")
+   - 返回 GraphModel
+   
+5. 响应序列化
+   - GraphModel.model_dump() → JSON
+   - 返回 HTTP 200 + JSON
+   
+6. 客户端反序列化
+   - 解析 JSON
+   - TypeAdapter(GraphModel).validate_python(json_data)
+   - 返回 GraphModel 实例
+   
+7. 用户获得结果
+   graph: GraphModel = client.get_graph(...)
+"""
+```
+
+---
+
+## 学习重点 1：理解 RPC 设计模式
+
+### RPC vs REST 对比
+
+```python
+# ===== REST 风格 =====
+# 优点：标准化、缓存友好、语义清晰
+# 缺点：需要手动编写路由、序列化、客户端代码
+
+# 服务端
+@app.get("/graphs/{graph_id}")
+async def get_graph(graph_id: str, user_id: str = Query(...)):
+    graph = await database.get_graph(graph_id, user_id)
+    return graph.model_dump()
+
+# 客户端
+response = requests.get(
+    f"http://service/graphs/{graph_id}",
+    params={"user_id": user_id}
+)
+graph_dict = response.json()
+graph = GraphModel(**graph_dict)  # 手动反序列化
+
+# ===== RPC 风格（AutoGPT） =====
+# 优点：简单、类型安全、像本地调用
+# 缺点：不遵循 REST 约定、难以缓存
+
+# 服务端
+@expose
+async def get_graph(self, graph_id: str, user_id: str) -> GraphModel:
+    return await database.get_graph(graph_id, user_id)
+
+# 客户端
+graph: GraphModel = await client.get_graph(graph_id, user_id)
+# ↑ 完全像本地调用！
+```
+
+### AutoGPT RPC 的设计优势
+
+```python
+"""
+1. 零样板代码
+   - 不需要手写路由定义
+   - 不需要手写序列化逻辑
+   - 不需要手写客户端方法
+
+2. 类型安全
+   - 使用 Python 类型注解
+   - IDE 自动补全和类型检查
+   - Pydantic 自动验证
+
+3. 异常透明
+   - 服务端异常自动传递到客户端
+   - 客户端可以捕获具体异常类型
+   - 不需要解析错误码
+
+4. 同步/异步灵活
+   - 服务端可以是异步的
+   - 客户端可以选择同步或异步调用
+   - 自动处理事件循环隔离
+
+5. 可观测性
+   - 自动集成 Prometheus 指标
+   - 自动集成 Sentry 错误追踪
+   - 健康检查端点
+"""
+```
+
+### 适用场景
+
+```python
+"""
+✅ 适合 RPC 的场景：
+1. 微服务内部通信（不对外暴露）
+2. 类型安全要求高
+3. 快速迭代开发
+4. 服务数量可控
+
+❌ 不适合 RPC 的场景：
+1. 公共 API（应使用 REST）
+2. 需要 HTTP 缓存
+3. 需要语义化 URL
+4. 第三方集成
+"""
+```
+
+---
+
+## 学习重点 2：掌握元编程技巧
+
+### 技巧 1：动态创建 Pydantic 模型
+
+```python
+from pydantic import create_model
+
+# 动态创建模型
+fields = {
+    "name": (str, ...),           # (类型, 默认值)
+    "age": (int, 18),             # 有默认值
+    "email": (Optional[str], None) # 可选字段
+}
+
+DynamicModel = create_model("DynamicModel", **fields)
+
+# 等价于手写：
+class DynamicModel(BaseModel):
+    name: str
+    age: int = 18
+    email: Optional[str] = None
+
+# AutoGPT 使用场景
+def _create_fastapi_endpoint(self, func):
+    sig = inspect.signature(func)
+    fields = {}
+    for name, param in sig.parameters.items():
+        if name != "self":
+            fields[name] = (param.annotation, param.default)
+    
+    RequestModel = create_model("RequestModel", **fields)
+    # ↑ 根据函数签名动态创建请求模型
+```
+
+### 技巧 2：inspect 签名操作
+
+```python
+import inspect
+
+def analyze_function(func):
+    """深入分析函数签名"""
+    sig = inspect.signature(func)
+    
+    # 1. 获取所有参数
+    params = sig.parameters
+    # → OrderedDict([('self', <Parameter>), ('user_id', <Parameter>), ...])
+    
+    # 2. 检查参数类型
+    for name, param in params.items():
+        print(f"参数: {name}")
+        print(f"  类型: {param.annotation}")
+        print(f"  默认值: {param.default}")
+        print(f"  种类: {param.kind}")
+        # kind 可以是：
+        # - POSITIONAL_OR_KEYWORD: 普通参数
+        # - VAR_POSITIONAL: *args
+        # - VAR_KEYWORD: **kwargs
+        # - KEYWORD_ONLY: 仅关键字参数
+    
+    # 3. 获取返回类型
+    return_type = sig.return_annotation
+    
+    # 4. 检查是否异步
+    is_async = inspect.iscoroutinefunction(func)
+    
+    return {
+        "params": list(params.keys()),
+        "return_type": return_type,
+        "is_async": is_async
+    }
+
+# 实战示例
+async def get_user(user_id: str, include_posts: bool = False) -> User:
+    ...
+
+info = analyze_function(get_user)
+# {
+#     "params": ["user_id", "include_posts"],
+#     "return_type": User,
+#     "is_async": True
+# }
+```
+
+### 技巧 3：__getattr__ 魔法方法
+
+```python
+class DynamicProxy:
+    """动态代理模式"""
+    
+    def __init__(self, target):
+        self._target = target
+    
+    def __getattr__(self, name):
+        """拦截所有属性访问"""
+        print(f"访问属性: {name}")
+        
+        # 获取目标对象的属性
+        original = getattr(self._target, name)
+        
+        if callable(original):
+            # 如果是方法，返回包装器
+            def wrapper(*args, **kwargs):
+                print(f"调用方法: {name}")
+                print(f"参数: {args}, {kwargs}")
+                result = original(*args, **kwargs)
+                print(f"结果: {result}")
+                return result
+            return wrapper
+        else:
+            # 如果是普通属性，直接返回
+            return original
+
+# 使用
+class Calculator:
+    def add(self, a, b):
+        return a + b
+
+calc = DynamicProxy(Calculator())
+result = calc.add(5, 3)
+# 输出：
+# 访问属性: add
+# 调用方法: add
+# 参数: (5, 3), {}
+# 结果: 8
+```
+
+### 技巧 4：装饰器元数据
+
+```python
+def with_metadata(**metadata):
+    """添加元数据的装饰器"""
+    def decorator(func):
+        # 在函数上设置自定义属性
+        for key, value in metadata.items():
+            setattr(func, f"__{key}__", value)
+        return func
+    return decorator
+
+# 使用
+@with_metadata(rate_limit=100, cache=True)
+def expensive_operation():
+    pass
+
+# 检查元数据
+print(expensive_operation.__rate_limit__)  # 100
+print(expensive_operation.__cache__)       # True
+
+# AutoGPT 使用
+@expose  # 设置 __exposed__ = True
+def my_method():
+    pass
+
+# 检查
+if getattr(my_method, "__exposed__", False):
+    print("这是暴露的方法")
+```
+
+### 技巧 5：类型适配器
+
+```python
+from pydantic import TypeAdapter
+
+# 动态类型验证
+UserAdapter = TypeAdapter(User)
+
+# 验证和转换
+user_dict = {"id": 1, "name": "John"}
+user = UserAdapter.validate_python(user_dict)
+# → User(id=1, name="John")
+
+# 支持泛型
+ListUserAdapter = TypeAdapter(list[User])
+users = ListUserAdapter.validate_python([
+    {"id": 1, "name": "John"},
+    {"id": 2, "name": "Jane"}
+])
+# → [User(...), User(...)]
+
+# AutoGPT 使用
+sig = inspect.signature(func)
+ret_type = sig.return_annotation
+
+if ret_type != inspect.Signature.empty:
+    adapter = TypeAdapter(ret_type)
+    result = adapter.validate_python(json_data)
+else:
+    result = json_data
+```
+
+---
+
+## 学习重点 3：服务间通信最佳实践
+
+### 1. 连接池管理
+
+```python
+class DynamicClient:
+    def __init__(self):
+        self._sync_clients = {}
+        self._async_clients = {}  # 按事件循环分组
+    
+    @property
+    def async_client(self) -> httpx.AsyncClient:
+        """
+        最佳实践：每个事件循环一个客户端
+        
+        为什么？
+        - httpx.AsyncClient 不是线程安全的
+        - 不能跨事件循环共享
+        - 避免 "attached to a different loop" 错误
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        
+        if client := self._async_clients.get(loop):
+            return client
+        
+        return self._async_clients.setdefault(
+            loop,
+            httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=30,
+                limits=httpx.Limits(
+                    max_keepalive_connections=200,
+                    max_connections=500,
+                    keepalive_expiry=30.0,
+                )
+            )
+        )
+```
+
+### 2. 超时和重试
+
+```python
+# 配置
+config.rpc_client_call_timeout = 30       # 单次调用超时
+config.pyro_client_comm_retry = 3         # 重试次数
+config.pyro_client_max_wait = 10          # 最大等待时间
+
+# 使用
+client = get_service_client(
+    MyServiceClient,
+    call_timeout=60,      # 覆盖默认超时
+    request_retry=True    # 启用重试
+)
+
+# 重试策略
+def _maybe_retry(fn):
+    if not request_retry:
+        return fn
+    
+    return create_retry_decorator(
+        max_attempts=3,
+        max_wait=10,
+        exclude_exceptions=(
+            ValueError,         # 不重试的异常
+            HTTPClientError,    # 4xx 错误
+        )
+    )(fn)
+```
+
+### 3. 健康检查
+
+```python
+class AppService(BaseAppService):
+    async def health_check(self) -> str:
+        """标准健康检查"""
+        return "OK"
+    
+    # 自动注册为：
+    # GET /health_check
+    # POST /health_check
+
+# 使用
+client = get_service_client(MyServiceClient)
+try:
+    status = client.health_check()
+    if status == "OK":
+        # 服务健康
+        pass
+except Exception as e:
+    # 服务不可用
+    raise UnhealthyServiceError(f"Service unhealthy: {e}")
+```
+
+### 4. Prisma 对象验证
+
+```python
+def _validate_no_prisma_objects(obj: Any, path: str = "result") -> None:
+    """
+    最佳实践：禁止返回 Prisma 对象
+    
+    为什么？
+    1. 层次分离：数据库层 ≠ API 层
+    2. Prisma 对象包含内部状态，不适合序列化
+    3. 应该返回 Application Models
+    
+    正确做法：
+    prisma_user = await prisma.user.find_unique(...)
+    return UserModel.from_db(prisma_user)  # ✓
+    
+    错误做法：
+    return prisma_user  # ✗ 会抛出 ValueError
+    """
+    if hasattr(obj, "__class__") and hasattr(obj.__class__, "__module__"):
+        module_name = obj.__class__.__module__
+        if "prisma.models" in module_name:
+            raise ValueError(
+                f"Prisma object {obj.__class__.__name__} found in {path}. "
+                "Use {obj.__class__.__name__}.from_db() to convert."
+            )
+```
+
+### 5. 错误处理
+
+```python
+# 服务端：分类错误
+@expose
+async def get_user(self, user_id: str) -> User:
+    try:
+        user = await db.find_user(user_id)
+        if not user:
+            # 4xx：客户端错误
+            raise NotFoundError(f"User {user_id} not found")
+        return user
+    except DatabaseError as e:
+        # 5xx：服务器错误
+        raise RuntimeError(f"Database error: {e}")
+
+# 客户端：捕获具体异常
+try:
+    user = client.get_user("invalid-id")
+except NotFoundError:
+    # 处理未找到
+    pass
+except RuntimeError:
+    # 处理服务器错误
+    pass
+except HTTPClientError as e:
+    # 4xx 错误（不会重试）
+    if e.status_code == 401:
+        # 未授权
+        pass
+except HTTPServerError as e:
+    # 5xx 错误（会重试）
+    pass
+```
+
+### 6. 资源清理
+
+```python
+# 使用上下文管理器
+async with get_service_client(MyServiceClient) as client:
+    result = await client.do_something()
+    # 自动调用 aclose()
+
+# 或手动清理
+client = get_service_client(MyServiceClient)
+try:
+    result = await client.do_something()
+finally:
+    await client.aclose()  # 关闭所有 HTTP 连接
+```
+
+---
+
+## RPC 模式总结
+
+```
+AutoGPT RPC 框架特点
+│
+├─── 🎯 核心设计
+│    ├─ @expose 装饰器标记端点
+│    ├─ 自动路由生成（方法名 → HTTP 路径）
+│    ├─ 动态 Pydantic 模型创建
+│    ├─ __getattr__ 魔法方法拦截
+│    └─ 透明的异常传递
+│
+├─── 🔧 元编程技巧
+│    ├─ inspect.signature() 提取签名
+│    ├─ create_model() 动态模型
+│    ├─ TypeAdapter 类型转换
+│    ├─ update_wrapper() 保持元数据
+│    └─ 装饰器元数据存储
+│
+├─── 🌐 通信机制
+│    ├─ HTTP + JSON（FastAPI + httpx）
+│    ├─ POST /method_name
+│    ├─ 连接池管理（按事件循环）
+│    ├─ 自动重试机制
+│    └─ 连接自愈
+│
+├─── 🛡️ 可靠性
+│    ├─ 异常映射和重建
+│    ├─ 类型验证（Pydantic）
+│    ├─ Prisma 对象检查
+│    ├─ 超时控制
+│    └─ 健康检查
+│
+└─── 📈 可观测性
+     ├─ Prometheus 指标
+     ├─ Sentry 错误追踪
+     ├─ 结构化日志
+     └─ 连接失败计数
+```
+
+---
+
+# 专题B：双服务器架构
+
+---
+
+## 核心内容 1：REST API Server 架构
+
+### AgentServer 职责
+
+```python
+# backend/server/rest_api.py
+
+class AgentServer(AppProcess):
+    """
+    REST API 服务器 - 处理所有 HTTP REST 请求
+    
+    职责：
+    1. 图（Graph）的 CRUD 操作
+    2. 节点（Block）管理
+    3. 执行触发（创建执行任务）
+    4. 用户认证和授权
+    5. Store/Library 管理
+    6. 健康检查
+    """
+    
+    def run(self):
+        # 配置 CORS
+        server_app = CORSMiddleware(
+            app=app,
+            allow_origins=settings.config.backend_cors_allow_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        
+        config = Config()
+        
+        # uvicorn 性能优化配置
+        uvicorn_config = {
+            "app": server_app,
+            "host": config.agent_api_host,       # 默认 0.0.0.0
+            "port": config.agent_api_port,       # 默认 8006
+            "log_config": None,
+            "http": "httptools",                 # 使用 httptools 解析器
+            "loop": "uvloop" if platform.system() != "Windows" else "auto",
+        }
+        
+        uvicorn.run(**uvicorn_config)
+```
+
+### REST API 路由结构
+
+```python
+# backend/server/rest_api.py
+
+app = FastAPI(
+    title="AutoGPT Agent Server",
+    description="Server for executing AutoGPT agents",
+    version="0.1",
+    lifespan=lifespan_context,
+    docs_url=docs_url,
+    generate_unique_id_function=custom_generate_unique_id,
+)
+
+# ===== 路由注册 =====
+
+# v1 API（主要功能）
+app.include_router(
+    backend.server.routers.v1.v1_router,
+    tags=["v1"],
+    prefix="/api"
+)
+# → /api/graphs, /api/blocks, /api/auth, /api/executions
+
+# v2 Store（应用商店）
+app.include_router(
+    backend.server.v2.store.routes.router,
+    tags=["v2"],
+    prefix="/api/store"
+)
+
+# v2 Builder（图构建器）
+app.include_router(
+    backend.server.v2.builder.routes.router,
+    tags=["v2"],
+    prefix="/api/builder"
+)
+
+# v2 Library（模板库）
+app.include_router(
+    backend.server.v2.library.routes.router,
+    tags=["v2"],
+    prefix="/api/library"
+)
+
+# 管理员路由
+app.include_router(
+    backend.server.v2.admin.store_admin_routes.router,
+    tags=["v2", "admin"],
+    prefix="/api/store"
+)
+
+# 外部 API（独立挂载）
+app.mount("/external-api", external_app)
+
+# 健康检查
+@app.get("/health", tags=["health"])
+async def health():
+    if not backend.data.db.is_connected():
+        raise UnhealthyServiceError("Database is not connected")
+    return {"status": "healthy"}
+```
+
+### REST API 生命周期
+
+```python
+# backend/server/rest_api.py
+
+@contextlib.asynccontextmanager
+async def lifespan_context(app: FastAPI):
+    """
+    应用生命周期管理
+    
+    启动时：
+    1. 验证认证配置
+    2. 连接数据库
+    3. 配置线程池
+    4. 初始化 blocks
+    5. 数据迁移
+    """
+    # 1. 验证认证
+    verify_auth_settings()
+    
+    # 2. 连接数据库
+    await backend.data.db.connect()
+    
+    # 3. 配置线程池（关键性能优化）
+    config = backend.util.settings.Config()
+    try:
+        import anyio.to_thread
+        anyio.to_thread.current_default_thread_limiter().total_tokens = (
+            config.fastapi_thread_pool_size  # 默认 400 线程
+        )
+        logger.info(f"Thread pool size set to {config.fastapi_thread_pool_size}")
+    except (ImportError, AttributeError) as e:
+        logger.warning(f"Could not configure thread pool size: {e}")
+    
+    # 4. 初始化 blocks
+    await backend.data.block.initialize_blocks()
+    
+    # 5. 数据迁移
+    await backend.data.user.migrate_and_encrypt_user_integrations()
+    await backend.data.graph.fix_llm_provider_credentials()
+    await backend.data.graph.migrate_llm_models(LlmModel.GPT4O)
+    await backend.integrations.webhooks.utils.migrate_legacy_triggered_graphs()
+    
+    # 6. 启动 LaunchDarkly（如果非本地环境）
+    with launch_darkly_context():
+        yield  # 应用运行期间
+    
+    # 关闭时：清理资源
+    try:
+        await shutdown_cloud_storage_handler()
+    except Exception as e:
+        logger.warning(f"Error shutting down cloud storage: {e}")
+    
+    await backend.data.db.disconnect()
+```
+
+---
+
+## 核心内容 2：WebSocket Server 架构
+
+### WebsocketServer 职责
+
+```python
+# backend/server/ws_api.py
+
+class WebsocketServer(AppProcess):
+    """
+    WebSocket 服务器 - 处理实时双向通信
+    
+    职责：
+    1. 实时执行状态更新推送
+    2. 订阅/取消订阅管理
+    3. 心跳检测
+    4. WebSocket 连接管理
+    """
+    
+    def run(self):
+        logger.info(f"CORS origins: {settings.config.backend_cors_allow_origins}")
+        
+        server_app = CORSMiddleware(
+            app=app,
+            allow_origins=settings.config.backend_cors_allow_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        
+        uvicorn.run(
+            server_app,
+            host=Config().websocket_server_host,  # 默认 0.0.0.0
+            port=Config().websocket_server_port,  # 默认 8001
+            log_config=None,
+        )
+```
+
+### WebSocket 生命周期
+
+```python
+# backend/server/ws_api.py
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    WebSocket 应用生命周期
+    
+    启动时：启动事件广播器
+    关闭时：停止广播器
+    """
+    manager = get_connection_manager()
+    
+    # 创建后台任务：监听 Redis 事件并广播
+    fut = asyncio.create_task(event_broadcaster(manager))
+    fut.add_done_callback(lambda _: logger.info("Event broadcaster stopped"))
+    
+    yield  # 应用运行期间
+
+@continuous_retry()  # 自动重试，永不停止
+async def event_broadcaster(manager: ConnectionManager):
+    """
+    事件广播器 - 核心通信桥梁
+    
+    流程：
+    1. 监听 Redis Pub/Sub（所有执行事件）
+    2. 接收到事件 → 发送给订阅的 WebSocket 连接
+    """
+    event_queue = AsyncRedisExecutionEventBus()
+    
+    # 监听所有频道（"*" 通配符）
+    async for event in event_queue.listen("*"):
+        # 广播给订阅者
+        await manager.send_execution_update(event)
+```
+
+### WebSocket 路由
+
+```python
+# backend/server/ws_api.py
+
+@app.websocket("/ws")
+async def websocket_router(
+    websocket: WebSocket,
+    manager: ConnectionManager = Depends(get_connection_manager)
+):
+    """
+    WebSocket 主端点
+    
+    处理流程：
+    1. 认证
+    2. 建立连接
+    3. 消息循环
+    4. 断开清理
+    """
+    # 1. 认证
+    user_id = await authenticate_websocket(websocket)
+    if not user_id:
+        return  # 认证失败，连接已关闭
+    
+    # 2. 建立连接
+    await manager.connect_socket(websocket)
+    update_websocket_connections(user_id, 1)  # Prometheus 指标
+    
+    try:
+        # 3. 消息循环
+        while True:
+            data = await websocket.receive_text()
+            
+            # 解析消息
+            try:
+                message = WSMessage.model_validate_json(data)
+            except pydantic.ValidationError as e:
+                await websocket.send_text(
+                    WSMessage(
+                        method=WSMethod.ERROR,
+                        success=False,
+                        error="Invalid message format"
+                    ).model_dump_json()
+                )
+                continue
+            
+            # 分发到处理器
+            if message.method in _MSG_HANDLERS:
+                await _MSG_HANDLERS[message.method](
+                    connection_manager=manager,
+                    websocket=websocket,
+                    user_id=user_id,
+                    message=message,
+                )
+            else:
+                await websocket.send_text(
+                    WSMessage(
+                        method=WSMethod.ERROR,
+                        success=False,
+                        error="Unknown message type"
+                    ).model_dump_json()
+                )
+    
+    except WebSocketDisconnect:
+        manager.disconnect_socket(websocket)
+        logger.debug("WebSocket client disconnected")
+    
+    finally:
+        # 4. 清理
+        update_websocket_connections(user_id, -1)
+
+# 消息处理器映射
+_MSG_HANDLERS: dict[WSMethod, WSMessageHandler] = {
+    WSMethod.HEARTBEAT: handle_heartbeat,
+    WSMethod.SUBSCRIBE_GRAPH_EXEC: handle_subscribe,
+    WSMethod.SUBSCRIBE_GRAPH_EXECS: handle_subscribe,
+    WSMethod.UNSUBSCRIBE: handle_unsubscribe,
+}
+```
+
+### WebSocket 消息协议
+
+```python
+# backend/server/model.py
+
+class WSMethod(str, Enum):
+    """WebSocket 消息方法"""
+    HEARTBEAT = "heartbeat"
+    SUBSCRIBE_GRAPH_EXEC = "subscribe_graph_execution"
+    SUBSCRIBE_GRAPH_EXECS = "subscribe_graph_executions"
+    UNSUBSCRIBE = "unsubscribe"
+    GRAPH_EXECUTION_EVENT = "graph_execution_event"
+    NODE_EXECUTION_EVENT = "node_execution_event"
+    ERROR = "error"
+
+class WSMessage(BaseModel):
+    """WebSocket 消息格式"""
+    method: WSMethod
+    data: Optional[dict | list | str] = None
+    success: bool | None = None
+    channel: str | None = None
+    error: str | None = None
+
+# 示例：订阅执行
+{
+    "method": "subscribe_graph_execution",
+    "data": {"graph_exec_id": "exec-123"}
+}
+
+# 示例：接收事件
+{
+    "method": "graph_execution_event",
+    "channel": "user-456|graph_exec#exec-123",
+    "data": {
+        "id": "exec-123",
+        "status": "RUNNING",
+        "user_id": "user-456",
+        ...
+    }
+}
+```
+
+---
+
+## 核心内容 3：连接管理器
+
+### ConnectionManager 设计
+
+```python
+# backend/server/conn_manager.py
+
+class ConnectionManager:
+    """
+    WebSocket 连接和订阅管理器
+    
+    架构：
+    - active_connections: 所有活跃的 WebSocket 连接
+    - subscriptions: 频道 → WebSocket 连接的映射
+    """
+    
+    def __init__(self):
+        self.active_connections: Set[WebSocket] = set()
+        self.subscriptions: Dict[str, Set[WebSocket]] = {}
+        # 频道格式：
+        # - "user_id|graph_exec#exec_id"  # 单个执行
+        # - "user_id|graph#graph_id|executions"  # 所有执行
+    
+    async def connect_socket(self, websocket: WebSocket):
+        """建立连接"""
+        await websocket.accept()
+        self.active_connections.add(websocket)
+    
+    def disconnect_socket(self, websocket: WebSocket):
+        """断开连接 - 自动清理所有订阅"""
+        self.active_connections.discard(websocket)
+        # 从所有订阅中移除
+        for subscribers in self.subscriptions.values():
+            subscribers.discard(websocket)
+    
+    async def subscribe_graph_exec(
+        self, *, user_id: str, graph_exec_id: str, websocket: WebSocket
+    ) -> str:
+        """订阅单个执行"""
+        channel_key = f"{user_id}|graph_exec#{graph_exec_id}"
+        return await self._subscribe(channel_key, websocket)
+    
+    async def subscribe_graph_execs(
+        self, *, user_id: str, graph_id: str, websocket: WebSocket
+    ) -> str:
+        """订阅图的所有执行"""
+        channel_key = f"{user_id}|graph#{graph_id}|executions"
+        return await self._subscribe(channel_key, websocket)
+    
+    async def _subscribe(self, channel_key: str, websocket: WebSocket) -> str:
+        """通用订阅逻辑"""
+        if channel_key not in self.subscriptions:
+            self.subscriptions[channel_key] = set()
+        self.subscriptions[channel_key].add(websocket)
+        return channel_key
+    
+    async def send_execution_update(
+        self, exec_event: GraphExecutionEvent | NodeExecutionEvent
+    ) -> int:
+        """
+        发送执行更新到订阅者
+        
+        智能路由：
+        - GraphExecutionEvent → 发送到两个频道
+          1. 单个执行订阅者
+          2. 所有执行订阅者
+        - NodeExecutionEvent → 只发送到单个执行订阅者
+        """
+        graph_exec_id = (
+            exec_event.id
+            if isinstance(exec_event, GraphExecutionEvent)
+            else exec_event.graph_exec_id
+        )
+        
+        n_sent = 0
+        channels: set[str] = {
+            # 单个执行频道
+            f"{exec_event.user_id}|graph_exec#{graph_exec_id}"
+        }
+        
+        if isinstance(exec_event, GraphExecutionEvent):
+            # 所有执行频道
+            channels.add(
+                f"{exec_event.user_id}|graph#{exec_event.graph_id}|executions"
+            )
+        
+        # 发送到所有相关订阅者
+        for channel in channels.intersection(self.subscriptions.keys()):
+            message = WSMessage(
+                method=_EVENT_TYPE_TO_METHOD_MAP[exec_event.event_type],
+                channel=channel,
+                data=exec_event.model_dump(),
+            ).model_dump_json()
+            
+            for connection in self.subscriptions[channel]:
+                await connection.send_text(message)
+                n_sent += 1
+        
+        return n_sent
+```
+
+---
+
+## 核心内容 4：服务发现和协调
+
+### 进程启动顺序
+
+```python
+# backend/app.py
+
+def main(**kwargs):
+    """
+    启动所有服务进程
+    
+    顺序很重要！
+    """
+    from backend.executor import DatabaseManager, ExecutionManager, Scheduler
+    from backend.notifications import NotificationManager
+    from backend.server.rest_api import AgentServer
+    from backend.server.ws_api import WebsocketServer
+    
+    run_processes(
+        DatabaseManager().set_log_level("warning"),  # 1. 数据库服务
+        Scheduler(),                                 # 2. 调度器
+        NotificationManager(),                       # 3. 通知管理器
+        WebsocketServer(),                           # 4. WebSocket 服务器
+        AgentServer(),                               # 5. REST API 服务器
+        ExecutionManager(),                          # 6. 执行管理器（前台）
+        **kwargs,
+    )
+
+def run_processes(*processes: "AppProcess", **kwargs):
+    """
+    执行所有进程
+    
+    策略：
+    - 前 N-1 个进程：后台运行
+    - 最后一个进程：前台运行（阻塞主进程）
+    """
+    try:
+        # 后台启动前 N-1 个进程
+        for process in processes[:-1]:
+            process.start(background=True, **kwargs)
+        
+        # 前台运行最后一个进程
+        processes[-1].start(background=False, **kwargs)
+    
+    finally:
+        # 清理所有进程
+        for process in processes:
+            try:
+                process.stop()
+            except Exception as e:
+                logger.exception(f"Unable to stop {process.service_name}: {e}")
+```
+
+### 进程管理
+
+```python
+# backend/util/process.py
+
+class AppProcess(ABC):
+    """
+    应用进程基类
+    
+    特性：
+    1. 多进程隔离（使用 multiprocessing）
+    2. 信号处理（SIGTERM, SIGINT）
+    3. 优雅关闭
+    4. 错误上报（Sentry）
+    """
+    
+    process: Optional[Process] = None
+    cleaned_up = False
+    
+    # 使用 forkserver（更安全）
+    if "forkserver" in get_all_start_methods():
+        set_start_method("forkserver", force=True)
+    else:
+        set_start_method("spawn", force=True)
+    
+    @abstractmethod
+    def run(self):
+        """子类实现：进程主逻辑"""
+        pass
+    
+    @abstractmethod
+    def cleanup(self):
+        """子类实现：清理资源"""
+        pass
+    
+    def execute_run_command(self, silent):
+        """
+        进程执行包装器
+        
+        1. 注册信号处理
+        2. 执行 run()
+        3. 异常处理
+        4. 清理资源
+        """
+        # 1. 注册信号处理
+        signal.signal(signal.SIGTERM, self._self_terminate)
+        signal.signal(signal.SIGINT, self._self_terminate)
+        
+        try:
+            # 设置服务名（用于日志）
+            set_service_name(self.service_name)
+            logger.info(f"[{self.service_name}] Starting...")
+            
+            # 2. 执行主逻辑
+            self.run()
+        
+        except BaseException as e:
+            logger.warning(
+                f"[{self.service_name}] Termination: {type(e).__name__}; {e}"
+            )
+            # 3. 发送错误到 Sentry
+            if not isinstance(e, (KeyboardInterrupt, SystemExit)):
+                try:
+                    from backend.util.metrics import sentry_capture_error
+                    sentry_capture_error(e)
+                except Exception:
+                    pass
+        
+        finally:
+            # 4. 清理
+            self.cleanup()
+            logger.info(f"[{self.service_name}] Terminated.")
+    
+    def start(self, background: bool = False, silent: bool = False, **proc_args):
+        """
+        启动进程
+        
+        Args:
+            background: 是否后台运行
+            silent: 是否禁用输出
+        """
+        if not background:
+            # 前台运行：阻塞当前进程
+            self.execute_run_command(silent)
+            return 0
+        
+        # 后台运行：创建新进程
+        self.process = Process(
+            name=self.__class__.__name__,
+            target=self.execute_run_command,
+            args=(silent,),
+            **proc_args,
+        )
+        self.process.start()
+        logger.info(f"[{self.service_name}] started with PID {self.process.pid}")
+        
+        return self.process.pid or 0
+    
+    def stop(self):
+        """停止进程"""
+        if not self.process:
+            return
+        
+        self.process.terminate()  # 发送 SIGTERM
+        self.process.join()       # 等待退出
+```
+
+---
+
+## 核心内容 5：共享资源管理
+
+### 数据库连接共享
+
+```python
+"""
+数据库连接策略：
+
+问题：多进程不能共享数据库连接
+解决：每个进程独立连接
+
+模式：
+1. DatabaseManager 进程：提供 RPC 服务
+2. 其他进程：通过 RPC 调用数据库操作
+"""
+
+# DatabaseManager 进程
+class DatabaseManager(AppService):
+    def run_service(self):
+        logger.info("Connecting to Database...")
+        self.run_and_wait(db.connect())  # 建立连接
+        logger.info("Database connected")
+
+# 其他进程通过 RPC 访问
+from backend.util.clients import get_database_manager_client
+
+db_client = get_database_manager_client()
+graph = db_client.get_graph(graph_id="123", user_id="456")
+```
+
+### Redis 连接共享
+
+```python
+"""
+Redis 连接策略：
+
+每个进程独立连接 Redis
+使用连接池提高性能
+"""
+
+# backend/data/redis_client.py
+
+_redis_client: Optional[Redis] = None
+_async_redis_client: Optional[AsyncRedis] = None
+
+def get_redis() -> Redis:
+    """获取同步 Redis 客户端（线程安全）"""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = Redis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            decode_responses=True,
+            max_connections=50,  # 连接池
+        )
+    return _redis_client
+
+async def get_redis_async() -> AsyncRedis:
+    """获取异步 Redis 客户端"""
+    global _async_redis_client
+    if _async_redis_client is None:
+        _async_redis_client = AsyncRedis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            decode_responses=True,
+            max_connections=50,
+        )
+    return _async_redis_client
+```
+
+### RabbitMQ 连接共享
+
+```python
+"""
+RabbitMQ 连接策略：
+
+1. ExecutionManager：
+   - 消费者：监听执行队列
+   - 生产者：发布执行结果
+
+2. REST API：
+   - 生产者：发布执行请求
+
+3. 每个进程独立连接
+"""
+
+# ExecutionManager 进程
+class ExecutionManager(AppProcess):
+    def run(self):
+        self.run_client = SyncRabbitMQ(create_execution_queue_config())
+        
+        # 消费执行任务
+        run_channel = self.run_client.get_channel()
+        run_channel.basic_consume(
+            queue=GRAPH_EXECUTION_QUEUE_NAME,
+            on_message_callback=self._handle_run_message,
+            auto_ack=False,
+        )
+        
+        run_channel.start_consuming()
+
+# REST API 生产者
+async def add_graph_execution(...):
+    exec_queue = await get_async_execution_queue()
+    await exec_queue.publish_message(
+        routing_key=GRAPH_EXECUTION_ROUTING_KEY,
+        message=graph_exec_entry.model_dump_json(),
+        exchange=GRAPH_EXECUTION_EXCHANGE,
+    )
+```
+
+---
+
+## 核心内容 6：进程间通信
+
+### 通信方式总结
+
+```python
+"""
+AutoGPT 进程间通信方式：
+
+1. RPC (HTTP)
+   - 用途：同步调用（如数据库操作）
+   - 优点：类型安全、简单
+   - 缺点：有网络开销
+
+2. RabbitMQ (消息队列)
+   - 用途：异步任务分发
+   - 优点：可靠、持久化、解耦
+   - 缺点：复杂度高
+
+3. Redis Pub/Sub
+   - 用途：实时事件广播
+   - 优点：快速、简单
+   - 缺点：不可靠（订阅者离线会丢失）
+
+4. 共享数据库
+   - 用途：持久化状态
+   - 优点：一致性
+   - 缺点：性能瓶颈
+"""
+```
+
+### 通信流程图
+
+```
+执行图的完整流程：
+
+┌─────────────────┐
+│  用户请求       │
+│  POST /graphs/  │
+│  execute        │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────────────────┐
+│  AgentServer (REST API)     │
+│  1. 验证请求                │
+│  2. 创建执行记录（DB）      │
+│  3. 发布到 RabbitMQ         │
+│  4. 返回 execution_id       │
+└────────┬────────────────────┘
+         │ RabbitMQ
+         │ message
+         ▼
+┌─────────────────────────────┐
+│  ExecutionManager           │
+│  1. 消费任务                │
+│  2. 执行 Graph              │
+│  3. 更新状态（DB + Redis）  │
+└────────┬────────────────────┘
+         │ Redis Pub/Sub
+         │ events
+         ▼
+┌─────────────────────────────┐
+│  WebsocketServer            │
+│  1. 监听 Redis 事件         │
+│  2. 查找订阅者              │
+│  3. 推送到 WebSocket        │
+└────────┬────────────────────┘
+         │ WebSocket
+         │ messages
+         ▼
+┌─────────────────┐
+│  前端客户端      │
+│  实时显示状态    │
+└─────────────────┘
+```
+
+### 事件流转示例
+
+```python
+"""
+示例：执行状态更新的流转
+
+1. ExecutionManager 更新状态
+"""
+# backend/executor/manager.py
+async def update_execution_status(exec_id, status):
+    # 更新数据库
+    await db.update_graph_execution_stats(
+        graph_exec_id=exec_id,
+        status=status,
+    )
+    
+    # 发布事件到 Redis
+    event = GraphExecutionEvent(
+        id=exec_id,
+        user_id=user_id,
+        graph_id=graph_id,
+        status=status,
+        event_type=ExecutionEventType.GRAPH_EXEC_UPDATE,
+    )
+    await get_async_execution_event_bus().publish(event)
+
+"""
+2. Redis Pub/Sub 传播
+"""
+# Redis 自动处理
+
+"""
+3. WebsocketServer 接收
+"""
+# backend/server/ws_api.py
+@continuous_retry()
+async def event_broadcaster(manager: ConnectionManager):
+    event_queue = AsyncRedisExecutionEventBus()
+    async for event in event_queue.listen("*"):  # 监听所有事件
+        await manager.send_execution_update(event)  # 广播
+
+"""
+4. ConnectionManager 路由
+"""
+# backend/server/conn_manager.py
+async def send_execution_update(self, exec_event):
+    # 找到订阅者
+    channel = f"{exec_event.user_id}|graph_exec#{exec_event.id}"
+    if channel in self.subscriptions:
+        # 发送给所有订阅者
+        for websocket in self.subscriptions[channel]:
+            await websocket.send_text(message)
+
+"""
+5. 客户端接收
+"""
+// JavaScript
+ws.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.method === 'graph_execution_event') {
+        updateUI(message.data);  // 更新界面
+    }
+};
+```
+
+---
+
+让我继续完成服务拆分策略部分...
+
+## 学习重点 1：微服务架构设计
+
+### AutoGPT 服务拆分原则
+
+```python
+"""
+AutoGPT 的 6 大服务拆分原则：
+
+1. 单一职责原则
+   每个服务只负责一个领域
+
+2. 通信协议分离
+   REST 和 WebSocket 分开
+
+3. 数据访问隔离
+   数据库操作集中到 DatabaseManager
+
+4. 异步任务分离
+   ExecutionManager 专门处理执行
+
+5. 定时任务独立
+   Scheduler 处理所有调度
+
+6. 通知系统独立
+   NotificationManager 统一发送通知
+"""
+```
+
+### 服务职责划分表
+
+```
+服务名称              端口    职责                      通信方式
+────────────────────────────────────────────────────────────────
+DatabaseManager      8002    数据库CRUD操作            RPC (HTTP)
+Scheduler            8003    定时任务调度              RPC (HTTP)
+NotificationManager  8004    通知发送                  RPC (HTTP)
+WebsocketServer      8001    实时双向通信              WebSocket
+AgentServer          8006    REST API                  HTTP
+ExecutionManager     N/A     执行图任务                RabbitMQ消费
+────────────────────────────────────────────────────────────────
+
+外部依赖：
+- PostgreSQL (5432)   : 持久化存储
+- Redis (6379)        : 缓存 + Pub/Sub
+- RabbitMQ (5672)     : 消息队列
+```
+
+### 为什么要拆分 REST 和 WebSocket？
+
+```python
+"""
+REST API Server vs WebSocket Server 拆分原因：
+
+1. 协议特性不同
+   REST:
+   - 请求-响应模式
+   - 短连接
+   - 无状态
+   
+   WebSocket:
+   - 双向通信
+   - 长连接
+   - 有状态（维护订阅关系）
+
+2. 性能优化不同
+   REST:
+   - 线程池优化（处理短请求）
+   - HTTP/2 多路复用
+   - 负载均衡友好
+   
+   WebSocket:
+   - 连接保持
+   - 内存管理（维护大量连接）
+   - 心跳检测
+
+3. 扩展性不同
+   REST:
+   - 水平扩展容易（无状态）
+   - 可以随意增加实例
+   
+   WebSocket:
+   - 需要会话粘性（sticky session）
+   - 或者需要 Redis Pub/Sub 协调
+
+4. 故障隔离
+   - WebSocket 服务崩溃不影响 REST API
+   - REST API 重启不断开 WebSocket 连接
+
+5. 监控和调试
+   - 分开监控更清晰
+   - 问题排查更简单
+"""
+```
+
+### 架构演进
+
+```python
+"""
+AutoGPT 架构演进路径：
+
+阶段 1：单体应用 (Monolith)
+┌─────────────────────────────────┐
+│  FastAPI App                    │
+│  - REST API                     │
+│  - WebSocket                    │
+│  - Database                     │
+│  - Task Execution               │
+└─────────────────────────────────┘
+问题：难以扩展、单点故障
+
+阶段 2：基础拆分 (Current)
+┌──────────────┐  ┌──────────────┐
+│ REST API     │  │ WebSocket    │
+│ Server       │  │ Server       │
+└──────┬───────┘  └──────┬───────┘
+       │                  │
+       └─────────┬────────┘
+                 │
+       ┌─────────▼────────┐
+       │  Shared Services │
+       │  - Database      │
+       │  - Execution     │
+       │  - Scheduler     │
+       └──────────────────┘
+
+阶段 3：完全微服务 (Future)
+┌────────┐ ┌────────┐ ┌────────┐
+│ API    │ │ WS     │ │ Store  │
+│ Gateway│ │ Server │ │ Service│
+└───┬────┘ └───┬────┘ └───┬────┘
+    │          │          │
+    └──────────┼──────────┘
+               │
+    ┌──────────▼──────────┐
+    │ Service Mesh        │
+    │ (Kubernetes)        │
+    └─────────────────────┘
+"""
+```
+
+---
+
+## 学习重点 2：服务职责划分
+
+### 职责划分矩阵
+
+```python
+"""
+功能                REST API    WebSocket    ExecutionMgr    DatabaseMgr
+──────────────────────────────────────────────────────────────────────
+创建 Graph          ✓           ✗            ✗               RPC
+获取 Graph          ✓           ✗            ✗               RPC
+执行 Graph          ✓           ✗            ✓               ✗
+订阅执行状态        ✗           ✓            ✗               ✗
+推送状态更新        ✗           ✓            ✗               ✗
+任务队列消费        ✗           ✗            ✓               ✗
+数据库操作          RPC         ✗            RPC             ✓
+定时任务            ✗           ✗            ✗               ✗
+发送通知            ✗           ✗            ✗               ✗
+"""
+```
+
+### 服务边界清晰化
+
+```python
+# ===== AgentServer (REST API) =====
+class AgentServer(AppProcess):
+    """
+    只负责：
+    1. HTTP 请求处理
+    2. 参数验证
+    3. 权限检查
+    4. 业务编排（调用其他服务）
+    
+    不负责：
+    - 数据库直接操作
+    - 长时间执行
+    - WebSocket 连接
+    """
+    
+    async def create_graph_endpoint(self, graph_data: GraphCreate, user_id: str):
+        # 1. 验证（本地）
+        if not graph_data.name:
+            raise ValueError("Graph name is required")
+        
+        # 2. 权限检查（本地或通过认证服务）
+        if not await check_permission(user_id, "create_graph"):
+            raise NotAuthorizedError()
+        
+        # 3. 数据库操作（通过 DatabaseManager RPC）
+        db_client = get_database_manager_client()
+        graph = await db_client.create_graph(graph_data, user_id)
+        
+        # 4. 返回结果
+        return graph
+
+# ===== WebsocketServer =====
+class WebsocketServer(AppProcess):
+    """
+    只负责：
+    1. WebSocket 连接管理
+    2. 订阅/取消订阅
+    3. 消息路由和推送
+    4. 心跳检测
+    
+    不负责：
+    - 业务逻辑
+    - 数据库操作
+    - 任务执行
+    """
+    
+    # 只做连接和消息转发
+    async def handle_subscribe(self, websocket, message):
+        channel_key = await self.connection_manager.subscribe_graph_exec(
+            user_id=message.user_id,
+            graph_exec_id=message.data["graph_exec_id"],
+            websocket=websocket,
+        )
+        await websocket.send_text({"status": "subscribed", "channel": channel_key})
+
+# ===== ExecutionManager =====
+class ExecutionManager(AppProcess):
+    """
+    只负责：
+    1. 消费 RabbitMQ 任务
+    2. 执行 Graph
+    3. 更新执行状态
+    4. 发布事件
+    
+    不负责：
+    - HTTP 请求处理
+    - WebSocket 连接
+    - 任务创建
+    """
+    
+    def _handle_run_message(self, channel, method, properties, body):
+        graph_exec_entry = GraphExecutionEntry.model_validate_json(body)
+        
+        # 提交到线程池执行
+        future = self.executor.submit(
+            execute_graph,
+            graph_exec_entry,
+            cancel_event=threading.Event(),
+        )
+        
+        # 完成后确认消息
+        future.add_done_callback(
+            lambda f: channel.basic_ack(delivery_tag=method.delivery_tag)
+        )
+
+# ===== DatabaseManager =====
+class DatabaseManager(AppService):
+    """
+    只负责：
+    1. 数据库 CRUD 操作
+    2. 数据验证
+    3. 事务管理
+    
+    不负责：
+    - 业务逻辑
+    - 权限检查（可选）
+    - 任务执行
+    """
+    
+    @expose
+    async def get_graph(self, graph_id: str, user_id: str) -> GraphModel:
+        # 纯数据访问
+        graph = await prisma.agentgraph.find_first(
+            where={"id": graph_id, "userId": user_id}
+        )
+        if not graph:
+            raise NotFoundError(f"Graph {graph_id} not found")
+        return GraphModel.from_db(graph)
+```
+
+---
+
+## 学习重点 3：协调多个服务
+
+### 服务编排模式
+
+```python
+"""
+服务编排的 3 种模式：
+
+1. 同步编排 (Synchronous Orchestration)
+   特点：调用方等待结果
+   用途：获取数据、验证
+   
+2. 异步编排 (Asynchronous Orchestration)
+   特点：发送任务后立即返回
+   用途：长时间执行任务
+   
+3. 事件驱动 (Event-Driven)
+   特点：发布事件，订阅者自行处理
+   用途：状态更新、通知
+"""
+```
+
+### 同步编排示例
+
+```python
+# 场景：创建并执行 Graph
+
+@app.post("/api/graphs/{graph_id}/execute")
+async def create_and_execute_graph(
+    graph_id: str,
+    user_id: str,
+    inputs: dict
+):
+    """
+    编排多个服务：
+    1. 获取 Graph（DatabaseManager）
+    2. 验证权限（本地或认证服务）
+    3. 检查余额（CreditManager）
+    4. 创建执行（DatabaseManager）
+    5. 发布任务（RabbitMQ）
+    """
+    # 1. 获取 Graph
+    db_client = get_database_manager_client()
+    graph = await db_client.get_graph(graph_id=graph_id, user_id=user_id)
+    if not graph:
+        raise NotFoundError("Graph not found")
+    
+    # 2. 验证权限（简化）
+    if not await has_permission(user_id, "execute_graph"):
+        raise NotAuthorizedError()
+    
+    # 3. 检查余额
+    credit_service = get_credit_service_client()
+    balance = await credit_service.get_balance(user_id)
+    if balance < graph.estimated_cost:
+        raise InsufficientCreditsError()
+    
+    # 4. 创建执行记录
+    graph_exec = await db_client.create_graph_execution(
+        user_id=user_id,
+        graph_id=graph_id,
+        inputs=inputs,
+    )
+    
+    # 5. 发布到消息队列（异步执行）
+    exec_queue = await get_async_execution_queue()
+    await exec_queue.publish_message(
+        routing_key=GRAPH_EXECUTION_ROUTING_KEY,
+        message=graph_exec_entry.model_dump_json(),
+        exchange=GRAPH_EXECUTION_EXCHANGE,
+    )
+    
+    # 6. 立即返回
+    return {"execution_id": graph_exec.id, "status": "queued"}
+```
+
+### 异步编排示例
+
+```python
+# 场景：执行完成后的后续处理
+
+async def on_execution_complete(execution_id: str):
+    """
+    执行完成后的异步处理链
+    
+    1. 更新统计
+    2. 扣除费用
+    3. 发送通知
+    4. 触发 webhook
+    """
+    # 1. 获取执行结果
+    db_client = get_database_manager_client()
+    execution = await db_client.get_graph_execution(execution_id)
+    
+    # 2. 更新统计（不等待）
+    asyncio.create_task(
+        update_execution_stats(execution.user_id, execution.graph_id)
+    )
+    
+    # 3. 扣除费用（必须完成）
+    credit_service = get_credit_service_client()
+    await credit_service.deduct_credits(
+        user_id=execution.user_id,
+        amount=execution.total_cost,
+        reason=f"Execution {execution_id}"
+    )
+    
+    # 4. 发送通知（不等待）
+    notification_service = get_notification_manager_client()
+    asyncio.create_task(
+        notification_service.send_notification(
+            user_id=execution.user_id,
+            type="execution_complete",
+            data={"execution_id": execution_id, "status": execution.status}
+        )
+    )
+    
+    # 5. 触发 webhook（不等待）
+    asyncio.create_task(
+        trigger_webhooks(execution)
+    )
+```
+
+### 事件驱动示例
+
+```python
+# 场景：执行状态变更
+
+# 发布者：ExecutionManager
+async def update_execution_status(exec_id: str, status: ExecutionStatus):
+    # 1. 更新数据库
+    await db.update_graph_execution_stats(exec_id, status=status)
+    
+    # 2. 发布事件（Redis Pub/Sub）
+    event = GraphExecutionEvent(
+        id=exec_id,
+        status=status,
+        event_type=ExecutionEventType.GRAPH_EXEC_UPDATE,
+    )
+    await event_bus.publish(event)  # 发布即忘记
+
+# 订阅者 1：WebsocketServer
+async def event_broadcaster(manager):
+    event_queue = AsyncRedisExecutionEventBus()
+    async for event in event_queue.listen("*"):
+        # 推送给 WebSocket 订阅者
+        await manager.send_execution_update(event)
+
+# 订阅者 2：NotificationManager（假设）
+async def notification_listener():
+    event_queue = AsyncRedisExecutionEventBus()
+    async for event in event_queue.listen("*"):
+        if event.status == ExecutionStatus.COMPLETED:
+            # 发送完成通知
+            await send_completion_notification(event.user_id, event.id)
+
+# 订阅者 3：AnalyticsService（假设）
+async def analytics_listener():
+    event_queue = AsyncRedisExecutionEventBus()
+    async for event in event_queue.listen("*"):
+        # 收集分析数据
+        await record_analytics(event)
+```
+
+### 服务协调最佳实践
+
+```python
+"""
+服务协调最佳实践：
+
+1. 失败处理
+   - 同步调用：重试 + 超时
+   - 异步调用：死信队列
+   - 事件驱动：幂等性
+
+2. 事务管理
+   - 避免跨服务事务
+   - 使用 Saga 模式
+   - 最终一致性
+
+3. 超时控制
+   - 每个 RPC 调用设置超时
+   - 使用断路器模式
+   - 优雅降级
+
+4. 监控和追踪
+   - 分布式追踪（Trace ID）
+   - 日志关联
+   - 指标收集
+
+5. 版本兼容
+   - API 向后兼容
+   - 消息格式版本化
+   - 灰度发布
+"""
+
+# 示例：带超时和重试的 RPC 调用
+client = get_service_client(
+    DatabaseManagerClient,
+    call_timeout=30,      # 30秒超时
+    request_retry=True    # 自动重试
+)
+
+try:
+    result = await client.get_graph(graph_id="123", user_id="456")
+except TimeoutError:
+    # 超时处理
+    logger.error("Database service timeout")
+    raise ServiceUnavailableError("Database temporarily unavailable")
+except HTTPServerError:
+    # 5xx 错误（已自动重试）
+    logger.error("Database service error after retries")
+    raise
+```
+
+---
+
+## 双服务器架构总结
+
+```
+AutoGPT 双服务器架构特点
+│
+├─── 🏗️ 架构设计
+│    ├─ REST API Server (AgentServer)
+│    │   ├─ HTTP 请求处理
+│    │   ├─ 业务编排
+│    │   └─ 端口: 8006
+│    │
+│    ├─ WebSocket Server (WebsocketServer)
+│    │   ├─ 实时双向通信
+│    │   ├─ 订阅管理
+│    │   └─ 端口: 8001
+│    │
+│    └─ 支撑服务
+│        ├─ DatabaseManager (8002)
+│        ├─ ExecutionManager (消费者)
+│        ├─ Scheduler (8003)
+│        └─ NotificationManager (8004)
+│
+├─── 🔗 通信机制
+│    ├─ RPC (HTTP) - 同步调用
+│    ├─ RabbitMQ - 异步任务
+│    ├─ Redis Pub/Sub - 事件广播
+│    └─ 共享数据库 - 状态持久化
+│
+├─── 📡 服务协调
+│    ├─ 进程启动顺序管理
+│    ├─ 服务发现（配置文件）
+│    ├─ 健康检查
+│    └─ 优雅关闭
+│
+├─── 💾 资源管理
+│    ├─ 连接池（数据库、Redis、HTTP）
+│    ├─ 每进程独立连接
+│    └─ 资源清理机制
+│
+└─── ✨ 设计优势
+     ├─ 职责分离清晰
+     ├─ 独立扩展
+     ├─ 故障隔离
+     └─ 易于维护
+```
+
+---
+
+# 专题C：事件驱动架构
+
+---
+
+## 核心内容 1：Redis 事件总线
+
+### 事件总线架构
+
+```python
+"""
+AutoGPT 事件总线设计层次：
+
+1. BaseRedisEventBus (抽象基类)
+   - 定义事件总线接口
+   - 序列化/反序列化逻辑
+   - 通道管理
+
+2. RedisEventBus (同步版本)
+   - 同步发布/订阅
+   - 用于同步上下文
+
+3. AsyncRedisEventBus (异步版本)
+   - 异步发布/订阅
+   - 用于异步上下文
+   - 支持 wait_for_event
+
+4. 具体实现
+   - RedisExecutionEventBus
+   - AsyncRedisExecutionEventBus
+"""
+```
+
+### BaseRedisEventBus 实现
+
+```python
+# backend/data/event_bus.py
+
+M = TypeVar("M", bound=BaseModel)  # 事件模型类型
+
+class BaseRedisEventBus(Generic[M], ABC):
+    """
+    Redis 事件总线基类
+    
+    特性：
+    1. 类型安全（泛型）
+    2. 自动序列化/反序列化
+    3. 消息大小限制
+    4. Unicode 处理
+    """
+    
+    Model: type[M]  # 子类必须指定事件模型
+    
+    @property
+    @abstractmethod
+    def event_bus_name(self) -> str:
+        """事件总线名称（用作 Redis 频道前缀）"""
+        pass
+    
+    @property
+    def Message(self) -> type["_EventPayloadWrapper[M]"]:
+        """消息包装器类型"""
+        return _EventPayloadWrapper[self.Model]
+    
+    def _serialize_message(self, item: M, channel_key: str) -> tuple[str, str]:
+        """
+        序列化消息
+        
+        流程：
+        1. 包装为 _EventPayloadWrapper
+        2. 使用 backend.util.json.dumps（处理 datetime）
+        3. 检查消息大小
+        4. 超限则截断并返回错误消息
+        
+        返回：(message_json, full_channel_name)
+        """
+        MAX_MESSAGE_SIZE = config.max_message_size_limit  # 默认 10MB
+        
+        try:
+            # 使用自定义 JSON 编码器（支持 datetime）
+            message = json.dumps(
+                self.Message(payload=item),
+                ensure_ascii=False,
+                separators=(",", ":")  # 紧凑格式
+            )
+        except UnicodeError:
+            # Unicode 失败时回退到 ASCII
+            message = json.dumps(
+                self.Message(payload=item),
+                ensure_ascii=True,
+                separators=(",", ":")
+            )
+            logger.warning(
+                f"Unicode serialization failed for channel {channel_key}"
+            )
+        
+        # 检查消息大小
+        message_size = len(message.encode("utf-8"))
+        if message_size > MAX_MESSAGE_SIZE:
+            logger.warning(
+                f"Message size {message_size} bytes exceeds limit "
+                f"{MAX_MESSAGE_SIZE} bytes. Truncating."
+            )
+            # 返回错误负载
+            error_payload = {
+                "payload": {
+                    "event_type": "error_comms_update",
+                    "error": "Payload too large for Redis transmission",
+                    "original_size_bytes": message_size,
+                    "max_size_bytes": MAX_MESSAGE_SIZE,
+                }
+            }
+            message = json.dumps(error_payload, ensure_ascii=False)
+        
+        # 构建完整频道名
+        channel_name = f"{self.event_bus_name}/{channel_key}"
+        logger.debug(f"[{channel_name}] Publishing event: {message}")
+        
+        return message, channel_name
+    
+    def _deserialize_message(self, msg: Any, channel_key: str) -> M | None:
+        """
+        反序列化消息
+        
+        参数：
+        - msg: Redis 消息对象
+        - channel_key: 频道键（可能包含 * 通配符）
+        
+        返回：解析后的事件对象或 None
+        """
+        # 判断消息类型（普通订阅 vs 模式订阅）
+        message_type = "pmessage" if "*" in channel_key else "message"
+        if msg["type"] != message_type:
+            return None
+        
+        try:
+            logger.debug(f"[{channel_key}] Consuming event: {msg['data']}")
+            # 解析 JSON → _EventPayloadWrapper → 提取 payload
+            return self.Message.model_validate_json(msg["data"]).payload
+        except Exception as e:
+            logger.error(f"Failed to parse event from Redis: {msg}, error: {e}")
+            return None
+    
+    def _get_pubsub_channel(
+        self,
+        connection: redis.Redis | redis.AsyncRedis,
+        channel_key: str
+    ) -> tuple[PubSub | AsyncPubSub, str]:
+        """获取 Pub/Sub 对象和完整频道名"""
+        full_channel_name = f"{self.event_bus_name}/{channel_key}"
+        pubsub = connection.pubsub()
+        return pubsub, full_channel_name
+
+
+class _EventPayloadWrapper(BaseModel, Generic[M]):
+    """
+    消息包装器
+    
+    为什么需要？
+    允许 Model 是多个事件类型的联合（discriminated union）
+    
+    示例：
+    ExecutionEvent = GraphExecutionEvent | NodeExecutionEvent
+    """
+    payload: M
+```
+
+### 同步事件总线
+
+```python
+class RedisEventBus(BaseRedisEventBus[M], ABC):
+    """同步 Redis 事件总线"""
+    
+    @property
+    def connection(self) -> redis.Redis:
+        """获取同步 Redis 连接"""
+        return redis.get_redis()
+    
+    def publish_event(self, event: M, channel_key: str):
+        """
+        发布事件（同步）
+        
+        使用场景：
+        - 同步函数中发布事件
+        - 不需要等待发布完成
+        """
+        message, full_channel_name = self._serialize_message(event, channel_key)
+        self.connection.publish(full_channel_name, message)
+    
+    def listen_events(self, channel_key: str) -> Generator[M, None, None]:
+        """
+        监听事件（同步生成器）
+        
+        使用场景：
+        - 同步上下文
+        - 阻塞式消费
+        
+        支持：
+        - 普通订阅：subscribe("user_123/graph_456/exec_789")
+        - 模式订阅：psubscribe("user_123/*/exec_*")
+        """
+        pubsub, full_channel_name = self._get_pubsub_channel(
+            self.connection, channel_key
+        )
+        assert isinstance(pubsub, PubSub)
+        
+        # 根据是否有通配符选择订阅方式
+        if "*" in channel_key:
+            pubsub.psubscribe(full_channel_name)  # 模式订阅
+        else:
+            pubsub.subscribe(full_channel_name)   # 普通订阅
+        
+        # 阻塞式监听
+        for message in pubsub.listen():
+            if event := self._deserialize_message(message, channel_key):
+                yield event
+```
+
+### 异步事件总线
+
+```python
+class AsyncRedisEventBus(BaseRedisEventBus[M], ABC):
+    """异步 Redis 事件总线"""
+    
+    @property
+    async def connection(self) -> redis.AsyncRedis:
+        """获取异步 Redis 连接"""
+        return await redis.get_redis_async()
+    
+    async def publish_event(self, event: M, channel_key: str):
+        """
+        发布事件（异步）
+        
+        使用场景：
+        - 异步函数中发布事件
+        - 需要确保发布成功
+        """
+        message, full_channel_name = self._serialize_message(event, channel_key)
+        connection = await self.connection
+        await connection.publish(full_channel_name, message)
+    
+    async def listen_events(self, channel_key: str) -> AsyncGenerator[M, None]:
+        """
+        监听事件（异步生成器）
+        
+        使用场景：
+        - 异步上下文
+        - 非阻塞式消费
+        
+        示例：
+        async for event in event_bus.listen_events("*"):
+            await process_event(event)
+        """
+        pubsub, full_channel_name = self._get_pubsub_channel(
+            await self.connection, channel_key
+        )
+        assert isinstance(pubsub, AsyncPubSub)
+        
+        if "*" in channel_key:
+            await pubsub.psubscribe(full_channel_name)
+        else:
+            await pubsub.subscribe(full_channel_name)
+        
+        # 异步迭代
+        async for message in pubsub.listen():
+            if event := self._deserialize_message(message, channel_key):
+                yield event
+    
+    async def wait_for_event(
+        self,
+        channel_key: str,
+        timeout: Optional[float] = None
+    ) -> M | None:
+        """
+        等待单个事件（带超时）
+        
+        使用场景：
+        - 测试
+        - 等待特定事件完成
+        
+        示例：
+        event = await event_bus.wait_for_event(
+            "user_123/graph_456/exec_789",
+            timeout=30.0
+        )
+        """
+        try:
+            return await asyncio.wait_for(
+                anext(aiter(self.listen_events(channel_key))),
+                timeout
+            )
+        except TimeoutError:
+            return None
+```
+
+---
+
+## 核心内容 2：发布/订阅模式
+
+### 频道命名规范
+
+```python
+"""
+AutoGPT 事件频道命名规范：
+
+格式：{event_bus_name}/{user_id}/{graph_id}/{graph_exec_id}
+
+示例：
+1. 特定执行的所有事件
+   execution_events/user_123/graph_456/exec_789
+   
+2. 特定图的所有执行
+   execution_events/user_123/graph_456/*
+   
+3. 特定用户的所有事件
+   execution_events/user_123/*/*
+   
+4. 全局所有事件
+   execution_events/*/*/*  或  *
+
+支持的模式：
+- * : 通配符（匹配单层）
+- execution_events/user_*/graph_*/exec_* : 模式订阅
+"""
+```
+
+### 发布者模式
+
+```python
+# 发布者：ExecutionManager, Blocks, etc.
+
+async def publish_execution_event(execution: GraphExecution):
+    """
+    发布执行事件
+    
+    步骤：
+    1. 更新数据库
+    2. 发布事件到 Redis
+    """
+    # 1. 更新数据库
+    await db.update_graph_execution_stats(
+        graph_exec_id=execution.id,
+        status=execution.status,
+    )
+    
+    # 2. 发布事件
+    event_bus = get_async_execution_event_bus()
+    await event_bus.publish(execution)
+    
+# 内部实现
+class AsyncRedisExecutionEventBus(AsyncRedisEventBus[ExecutionEvent]):
+    async def publish(self, res: GraphExecutionMeta | NodeExecutionResult):
+        """统一发布接口"""
+        if isinstance(res, GraphExecutionMeta):
+            await self._publish_graph_exec_update(res)
+        else:
+            await self._publish_node_exec_update(res)
+    
+    async def _publish_graph_exec_update(self, res: GraphExecutionMeta):
+        """发布图执行更新"""
+        event_data = res.model_dump()
+        event_data.setdefault("inputs", {})
+        event_data.setdefault("outputs", {})
+        event = GraphExecutionEvent.model_validate(event_data)
+        
+        # 频道：{user_id}/{graph_id}/{exec_id}
+        await self._publish(event, f"{res.user_id}/{res.graph_id}/{res.id}")
+    
+    async def _publish_node_exec_update(self, res: NodeExecutionResult):
+        """发布节点执行更新"""
+        event = NodeExecutionEvent.model_validate(res.model_dump())
+        
+        # 频道：{user_id}/{graph_id}/{graph_exec_id}
+        await self._publish(
+            event,
+            f"{res.user_id}/{res.graph_id}/{res.graph_exec_id}"
+        )
+    
+    async def _publish(self, event: ExecutionEvent, channel: str):
+        """
+        发布事件（带负载截断）
+        
+        为什么截断？
+        - 避免 Redis 消息过大
+        - 防止网络传输问题
+        - 控制内存使用
+        """
+        limit = config.max_message_size_limit // 2
+        
+        if isinstance(event, GraphExecutionEvent):
+            event.inputs = truncate(event.inputs, limit)
+            event.outputs = truncate(event.outputs, limit)
+        elif isinstance(event, NodeExecutionEvent):
+            event.input_data = truncate(event.input_data, limit)
+            event.output_data = truncate(event.output_data, limit)
+        
+        # 调用基类的 publish_event
+        await self.publish_event(event, channel)
+```
+
+### 订阅者模式
+
+```python
+# 订阅者 1：WebSocket Server
+
+@continuous_retry()  # 永不停止，自动重试
+async def event_broadcaster(manager: ConnectionManager):
+    """
+    WebSocket 事件广播器
+    
+    职责：
+    1. 监听所有执行事件
+    2. 路由到订阅的 WebSocket 连接
+    """
+    event_queue = AsyncRedisExecutionEventBus()
+    
+    # 订阅所有事件（"*" 通配符）
+    async for event in event_queue.listen("*"):
+        # 发送给订阅者
+        await manager.send_execution_update(event)
+
+# 订阅者 2：特定用户的事件
+
+async def listen_user_events(user_id: str):
+    """监听特定用户的所有事件"""
+    event_bus = AsyncRedisExecutionEventBus()
+    
+    # 订阅：user_id/*/*（所有图和执行）
+    async for event in event_bus.listen(user_id, "*", "*"):
+        print(f"User {user_id} event: {event.event_type}")
+        await process_event(event)
+
+# 订阅者 3：特定执行的事件
+
+async def wait_for_execution_complete(user_id: str, exec_id: str):
+    """等待特定执行完成"""
+    event_bus = AsyncRedisExecutionEventBus()
+    
+    # 订阅：user_id/*/{exec_id}
+    async for event in event_bus.listen(user_id, "*", exec_id):
+        if isinstance(event, GraphExecutionEvent):
+            if event.status == ExecutionStatus.COMPLETED:
+                print("Execution completed!")
+                break
+            elif event.status == ExecutionStatus.FAILED:
+                print("Execution failed!")
+                break
+```
+
+### 多订阅者示例
+
+```python
+"""
+场景：一个事件，多个订阅者
+
+发布：
+user_123 执行 graph_456，执行 ID 为 exec_789
+
+频道：execution_events/user_123/graph_456/exec_789
+
+订阅者：
+1. WebSocket Server (订阅 "*")
+   → 推送给订阅该执行的 WebSocket 客户端
+
+2. Analytics Service (订阅 "*")
+   → 收集统计数据
+
+3. Notification Service (订阅 "*")
+   → 发送通知（执行完成时）
+
+4. Audit Logger (订阅 "*")
+   → 记录审计日志
+
+优点：
+- 发布者无需知道订阅者
+- 新增订阅者不影响发布者
+- 解耦服务
+"""
+
+# 发布者（ExecutionManager）
+await event_bus.publish(graph_execution)
+# ↓ Redis Pub/Sub
+
+# 订阅者 1（WebSocket Server）
+async for event in event_bus.listen("*"):
+    await websocket_manager.send_to_subscribers(event)
+
+# 订阅者 2（Analytics Service）
+async for event in event_bus.listen("*"):
+    await analytics.record(event)
+
+# 订阅者 3（Notification Service）
+async for event in event_bus.listen("*"):
+    if event.status == ExecutionStatus.COMPLETED:
+        await send_notification(event.user_id, event)
+```
+
+---
+
+## 核心内容 3：事件定义和传递
+
+### 事件模型定义
+
+```python
+# backend/data/execution.py
+
+class ExecutionEventType(str, Enum):
+    """事件类型枚举"""
+    GRAPH_EXEC_UPDATE = "graph_execution_update"    # 图执行更新
+    NODE_EXEC_UPDATE = "node_execution_update"      # 节点执行更新
+    ERROR_COMMS_UPDATE = "error_comms_update"       # 通信错误
+
+
+class GraphExecutionEvent(GraphExecution):
+    """
+    图执行事件
+    
+    继承自 GraphExecution，增加事件类型标识
+    """
+    event_type: Literal[ExecutionEventType.GRAPH_EXEC_UPDATE] = (
+        ExecutionEventType.GRAPH_EXEC_UPDATE
+    )
+    
+    # 从 GraphExecution 继承的字段：
+    # - id: 执行 ID
+    # - user_id: 用户 ID
+    # - graph_id: 图 ID
+    # - graph_version: 图版本
+    # - status: 执行状态
+    # - inputs: 输入数据
+    # - outputs: 输出数据
+    # - stats: 统计信息
+    # - created_at, updated_at: 时间戳
+
+
+class NodeExecutionEvent(NodeExecutionResult):
+    """
+    节点执行事件
+    
+    继承自 NodeExecutionResult，增加事件类型标识
+    """
+    event_type: Literal[ExecutionEventType.NODE_EXEC_UPDATE] = (
+        ExecutionEventType.NODE_EXEC_UPDATE
+    )
+    
+    # 从 NodeExecutionResult 继承的字段：
+    # - user_id, graph_id, graph_exec_id
+    # - node_id, node_exec_id
+    # - status: 节点状态
+    # - input_data: 输入数据
+    # - output_data: 输出数据
+    # - execution_time: 执行时间
+
+
+# 联合类型（使用 discriminator）
+ExecutionEvent = Annotated[
+    GraphExecutionEvent | NodeExecutionEvent,
+    Field(discriminator="event_type")  # 根据 event_type 字段区分
+]
+
+"""
+Discriminated Union 的优势：
+
+1. 类型安全
+   Pydantic 根据 event_type 自动选择正确的模型
+
+2. 自动验证
+   if event.event_type == "graph_execution_update":
+       # Pydantic 确保 event 是 GraphExecutionEvent
+
+3. IDE 支持
+   类型提示和自动补全
+
+示例：
+event_json = {
+    "event_type": "graph_execution_update",
+    "id": "exec-123",
+    "status": "RUNNING",
+    ...
+}
+event = ExecutionEvent.model_validate(event_json)
+# → 自动解析为 GraphExecutionEvent
+"""
+```
+
+### 事件传递流程
+
+```python
+"""
+完整的事件传递流程：
+
+┌─────────────────────────────────────────────────────────┐
+│ 1. 事件产生（ExecutionManager / Blocks）                │
+└────────────────┬────────────────────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────────┐
+│ 2. 更新数据库                                            │
+│    await db.update_graph_execution_stats(...)           │
+└────────────────┬────────────────────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────────┐
+│ 3. 发布到 Redis                                         │
+│    event_bus = get_async_execution_event_bus()          │
+│    await event_bus.publish(execution)                   │
+└────────────────┬────────────────────────────────────────┘
+                 │
+                 ├──> Redis Pub/Sub
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────────┐
+│ 4. Redis 分发给所有订阅者                                │
+│    - WebSocket Server                                   │
+│    - Analytics Service                                  │
+│    - Notification Service                               │
+│    - ...                                                │
+└────────────────┬────────────────────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────────┐
+│ 5. 订阅者处理                                            │
+│    async for event in event_bus.listen("*"):           │
+│        await handle_event(event)                        │
+└─────────────────────────────────────────────────────────┘
+"""
+```
+
+### 事件传递示例
+
+```python
+# 示例：Node 执行完成
+
+# 1. ExecutionManager 执行节点
+async def execute_node(node, input_data):
+    result = await node.execute(input_data)
+    
+    # 创建执行结果
+    node_exec_result = NodeExecutionResult(
+        user_id="user-123",
+        graph_id="graph-456",
+        graph_exec_id="exec-789",
+        node_id="node-1",
+        node_exec_id="node-exec-1",
+        status=ExecutionStatus.COMPLETED,
+        input_data=input_data,
+        output_data=result,
+    )
+    
+    # 2. 保存到数据库
+    await db.create_node_execution_result(node_exec_result)
+    
+    # 3. 发布事件
+    event_bus = get_async_execution_event_bus()
+    await event_bus.publish(node_exec_result)
+    
+    return result
+
+# 4. WebSocket Server 接收
+async def event_broadcaster(manager):
+    event_bus = AsyncRedisExecutionEventBus()
+    async for event in event_bus.listen("*"):
+        if isinstance(event, NodeExecutionEvent):
+            # 5. 推送给订阅者
+            await manager.send_execution_update(event)
+
+# 6. 客户端接收
+# WebSocket 消息：
+{
+    "method": "node_execution_event",
+    "channel": "user-123|graph_exec#exec-789",
+    "data": {
+        "event_type": "node_execution_update",
+        "node_id": "node-1",
+        "status": "COMPLETED",
+        "output_data": {...}
+    }
+}
+```
+
+---
+
+## 核心内容 4：WebSocket 推送集成
+
+### ConnectionManager 与事件总线集成
+
+```python
+# backend/server/conn_manager.py
+
+class ConnectionManager:
+    async def send_execution_update(
+        self,
+        exec_event: GraphExecutionEvent | NodeExecutionEvent
+    ) -> int:
+        """
+        发送执行更新到 WebSocket 订阅者
+        
+        智能路由：
+        1. GraphExecutionEvent → 两个频道
+           - 单个执行订阅者
+           - 所有执行订阅者
+        
+        2. NodeExecutionEvent → 一个频道
+           - 单个执行订阅者
+        
+        返回：发送的消息数量
+        """
+        graph_exec_id = (
+            exec_event.id
+            if isinstance(exec_event, GraphExecutionEvent)
+            else exec_event.graph_exec_id
+        )
+        
+        n_sent = 0
+        channels: set[str] = {
+            # 频道 1：单个执行
+            _graph_exec_channel_key(
+                exec_event.user_id,
+                graph_exec_id=graph_exec_id
+            )
+        }
+        
+        if isinstance(exec_event, GraphExecutionEvent):
+            # 频道 2：所有执行（只针对 Graph 事件）
+            channels.add(
+                _graph_execs_channel_key(
+                    exec_event.user_id,
+                    graph_id=exec_event.graph_id
+                )
+            )
+        
+        # 发送给所有相关订阅者
+        for channel in channels.intersection(self.subscriptions.keys()):
+            message = WSMessage(
+                method=_EVENT_TYPE_TO_METHOD_MAP[exec_event.event_type],
+                channel=channel,
+                data=exec_event.model_dump(),
+            ).model_dump_json()
+            
+            for connection in self.subscriptions[channel]:
+                await connection.send_text(message)
+                n_sent += 1
+        
+        return n_sent
+
+
+# 事件类型 → WebSocket 方法映射
+_EVENT_TYPE_TO_METHOD_MAP: dict[ExecutionEventType, WSMethod] = {
+    ExecutionEventType.GRAPH_EXEC_UPDATE: WSMethod.GRAPH_EXECUTION_EVENT,
+    ExecutionEventType.NODE_EXEC_UPDATE: WSMethod.NODE_EXECUTION_EVENT,
+}
+```
+
+### 完整的推送流程
+
+```python
+"""
+从 Redis 事件到 WebSocket 推送的完整流程：
+
+┌─────────────────────────────────────────────────────────────┐
+│ ExecutionManager: 发布事件到 Redis                           │
+│ await event_bus.publish(graph_execution)                    │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ Redis Pub/Sub
+                       ▼
+┌─────────────────────────────────────────────────────────────┐
+│ WebSocket Server: event_broadcaster                         │
+│ async for event in event_bus.listen("*"):                   │
+│     await manager.send_execution_update(event)              │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────────┐
+│ ConnectionManager: 路由到订阅者                              │
+│ 1. 确定频道（单个执行 / 所有执行）                            │
+│ 2. 查找订阅该频道的 WebSocket 连接                          │
+│ 3. 发送消息                                                 │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ WebSocket
+                       ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 前端客户端                                                   │
+│ ws.onmessage = (event) => {                                 │
+│     const msg = JSON.parse(event.data);                     │
+│     updateUI(msg.data);                                     │
+│ }                                                           │
+└─────────────────────────────────────────────────────────────┘
+"""
+```
+
+### 实战示例
+
+```python
+# 场景：执行状态更新的实时推送
+
+# 步骤 1：客户端订阅
+# JavaScript
+const ws = new WebSocket('ws://localhost:8001/ws?token=jwt_token');
+
+ws.onopen = () => {
+    // 订阅特定执行
+    ws.send(JSON.stringify({
+        method: 'subscribe_graph_execution',
+        data: {graph_exec_id: 'exec-789'}
+    }));
+};
+
+ws.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    
+    if (message.method === 'graph_execution_event') {
+        console.log('Graph status:', message.data.status);
+        updateProgressBar(message.data);
+    }
+    
+    if (message.method === 'node_execution_event') {
+        console.log('Node completed:', message.data.node_id);
+        updateNodeStatus(message.data);
+    }
+};
+
+# 步骤 2：服务端接收订阅
+# backend/server/ws_api.py
+async def handle_subscribe(manager, websocket, user_id, message):
+    sub_req = WSSubscribeGraphExecutionRequest.model_validate(message.data)
+    channel_key = await manager.subscribe_graph_exec(
+        user_id=user_id,
+        graph_exec_id=sub_req.graph_exec_id,
+        websocket=websocket,
+    )
+    # 返回确认
+    await websocket.send_text(
+        WSMessage(
+            method=WSMethod.SUBSCRIBE_GRAPH_EXEC,
+            success=True,
+            channel=channel_key,
+        ).model_dump_json()
+    )
+
+# 步骤 3：执行开始
+# backend/executor/manager.py
+async def start_execution(graph_exec_id):
+    graph_exec.status = ExecutionStatus.RUNNING
+    await db.update_graph_execution_stats(graph_exec_id, status=ExecutionStatus.RUNNING)
+    
+    # 发布事件
+    await event_bus.publish(graph_exec)
+    # → Redis: "execution_events/user-123/graph-456/exec-789"
+
+# 步骤 4：WebSocket Server 转发
+# backend/server/ws_api.py
+async def event_broadcaster(manager):
+    async for event in event_bus.listen("*"):
+        # event 是 GraphExecutionEvent
+        await manager.send_execution_update(event)
+        # → WebSocket: 发送给订阅 "user-123|graph_exec#exec-789" 的连接
+
+# 步骤 5：客户端收到更新
+# JavaScript: ws.onmess
+
+让我继续完成剩余内容：
+
+## 🎯 核心内容 5：异步任务触发
+
+### 事件驱动任务触发
+
+```python
+# 模式：事件触发后续任务
+
+# 1. 执行完成事件 → 触发后续任务
+async def on_graph_execution_complete(event: GraphExecutionEvent):
+    if event.status == ExecutionStatus.COMPLETED:
+        # 触发：扣费
+        await deduct_credits(event.user_id, event.total_cost)
+        
+        # 触发：发送通知
+        await send_notification(event.user_id, "execution_complete")
+        
+        # 触发：Webhook
+        await trigger_webhooks(event)
+
+# 2. 监听模式
+async def event_triggered_tasks():
+    event_bus = AsyncRedisExecutionEventBus()
+    async for event in event_bus.listen("*"):
+        if isinstance(event, GraphExecutionEvent):
+            if event.status == ExecutionStatus.COMPLETED:
+                asyncio.create_task(on_graph_execution_complete(event))
+```
+
+---
+
+## 核心内容 6：事件溯源概念
+
+### 事件日志
+
+```python
+# AutoGPT 的事件溯源特点：
+
+# 1. 数据库记录 + 事件流
+# - 数据库：当前状态
+# - Redis事件：状态变更历史（临时）
+
+# 2. 事件重放
+async def replay_execution(exec_id: str):
+    """通过事件重建执行历史"""
+    events = await db.get_execution_events(exec_id)
+    for event in events:
+        print(f"{event.created_at}: {event.status}")
+
+# 3. 审计追踪
+# 每个状态变更都发布事件 → 可追溯
+```
+
+---
+
+## 学习重点总结
+
+### 1. 事件驱动设计
+
+```python
+"""
+核心原则：
+✓ 发布者不知道订阅者
+✓ 订阅者不知道发布者
+✓ 松耦合、高内聚
+"""
+
+# 好的设计
+await event_bus.publish(event)  # 发布即忘记
+
+# 避免的设计
+await notify_websocket(event)  # 紧耦合
+await notify_analytics(event)
+await notify_audit(event)
+```
+
+### 2. 解耦服务
+
+```
+事件驱动解耦：
+
+ExecutionManager → Redis → WebSocketServer
+                ↓          ↓
+            Analytics   Notifications
+```
+
+### 3. 实时通知系统
+
+```python
+# 实时推送链路
+ExecutionManager → Redis Pub/Sub → WebSocket → 前端
+
+# 关键点：
+- Redis 作为消息总线
+- WebSocket 保持长连接
+- ConnectionManager 管理订阅
+```
+
+---
 
