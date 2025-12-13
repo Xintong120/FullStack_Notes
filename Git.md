@@ -27,6 +27,109 @@
 4. 配置.gitignore排除不需要的文件
 5. 如果遇到问题，先查看错误信息和建议的解决方案
 
+## Git网络错误解决方案总结
+
+当浏览器可以正常访问GitHub，但Git命令失败时的解决方案：
+
+#### 立即解决方案（按优先级）
+
+##### 1. **调整Git缓冲区大小**
+```bash
+git config --global http.postBuffer 524288000
+```
+- **原因**: 默认缓冲区太小，可能导致大文件上传失败
+- **效果**: 增加HTTP缓冲区到500MB
+
+##### 2. **检查并重置Git配置**
+```bash
+git config --global http.sslVerify false  # 临时禁用SSL验证
+git config --global core.preloadindex true  # 启用预加载
+git config --global core.fscache true      # 启用文件系统缓存
+```
+
+##### 3. **DNS和网络问题**
+```bash
+git config --global url."https://ghproxy.com/https://github.com/".insteadOf "https://github.com/"
+```
+- 使用GitHub镜像加速访问
+
+##### 4. **代理设置**
+```bash
+git config --global http.proxy http://proxy.company.com:8080
+git config --global https.proxy https://proxy.company.com:8080
+```
+
+#### 完整诊断流程
+
+##### 步骤1: 检查基础配置
+```bash
+git config --list | grep -E "(url|proxy|ssl)"
+```
+
+##### 步骤2: 测试网络连接
+```bash
+curl -I https://github.com
+telnet github.com 443  # 检查端口连通性
+```
+
+##### 步骤3: 重置网络相关设置
+```bash
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+git config --global --unset http.sslcainfo
+```
+
+#### 常见错误及解决方案
+
+| 错误信息                                   | 可能原因      | 解决方案              |
+| ------------------------------------------ | ------------- | --------------------- |
+| `Connection was reset`                     | 网络不稳定    | 增加缓冲区、切换网络  |
+| `Could not resolve host`                   | DNS问题       | 检查网络、使用镜像    |
+| `Failed to connect to github.com port 443` | SSL/HTTPS问题 | 禁用SSL验证或更新证书 |
+| `SSL certificate problem`                  | 证书问题      | 更新证书或禁用验证    |
+
+#### 最佳实践
+
+##### 1. **网络环境检查**
+- 确保网络连接稳定
+- 检查防火墙设置
+- 确认代理配置正确
+
+##### 2. **Git配置优化**
+```bash
+# 推荐的基础配置
+git config --global core.autocrlf true
+git config --global core.fscache true
+git config --global credential.helper manager
+```
+
+##### 3. **备用方案**
+- 使用SSH替代HTTPS
+- 配置多个远程仓库
+- 离线提交，待网络恢复后推送
+
+#### 快速修复脚本
+
+创建 `git-fix-network.sh`：
+```bash
+#!/bin/bash
+echo "修复Git网络配置..."
+
+# 1. 增加缓冲区
+git config --global http.postBuffer 524288000
+
+# 2. 启用缓存
+git config --global core.preloadindex true
+git config --global core.fscache true
+
+# 3. 禁用SSL验证（仅限测试环境）
+git config --global http.sslVerify false
+
+echo "Git网络配置修复完成！"
+```
+
+----------------------------------------------------------------------------------------------------
+
 ## 常见问题
 
 ### 1. 分支名称问题：`master` vs `main`
@@ -185,4 +288,84 @@ git config core.autocrlf input
 **学习点**：
 - Windows使用CRLF (`\r\n`)，Linux/Mac使用LF (`\n`)
 - Git可以自动转换，但可能产生警告
+### 4. Git子模块问题
+
+**问题描述**：`frontend` 文件夹显示为子模块，无法正常提交和在GitHub上浏览。
+
+**问题现象**：
+- GitHub上显示文件夹有右箭头图标
+- `git commit` 失败，提示子模块有未跟踪内容
+- `git status` 显示 "modified: frontend (modified content, untracked content)"
+
+**发现问题的命令**：
+```bash
+git ls-files --stage
+```
+
+**输出示例**：
+```
+160000 5bff57d4e10a86ad9c6677da1c135846b58350ba 0	frontend
+100644 38b70bdd109e4d52614b44ea08b6d86155274125 0	.env.example
+```
+
+**文件模式含义**：
+- `100644`：普通可读写文件
+- `100755`：可执行文件
+- `120000`：符号链接
+- `160000`：**Git子模块**（特殊模式，表示指向另一个仓库的链接）
+- `040000`：子目录
+
+**解决方案**：
+
+1. **取消子模块初始化**：
+   ```bash
+   git submodule deinit -f frontend
+   ```
+
+2. **移除子模块映射从索引**：
+   ```bash
+   git rm --cached frontend
+   ```
+
+3. **删除隐藏的.git目录**（如果存在）：
+   ```bash
+   rmdir /s /q frontend\.git  # Windows
+   # 或 rm -rf frontend/.git  # Linux/Mac
+   ```
+
+4. **重新添加为普通文件夹**：
+   ```bash
+   git add frontend/
+   ```
+
+5. **提交更改**：
+   ```bash
+   git commit -m "Convert submodule to regular directory"
+   ```
+
+6. **推送到GitHub**：
+   ```bash
+   git push origin main
+   ```
+
+**提交输出示例**：
+```
+delete mode 160000 frontend
+create mode 100644 frontend/... (119 files)
+```
+
+**学习点**：
+- Git子模块使用特殊的 `160000` 模式存储指向外部仓库的引用
+- GitHub识别此模式并显示子模块图标
+- 转换为普通文件后，GitHub会正常显示文件夹内容
+- `git ls-files --stage` 是诊断Git索引问题的强大工具
+
+**预防措施**：
+- 避免意外添加包含 `.git` 的目录
+- 使用 `git add .` 而不是 `git add *` 以避免意外包含隐藏目录
+- 定期检查 `git ls-files --stage` 输出以发现异常模式
+
+
+
+
 
